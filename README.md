@@ -1,6 +1,6 @@
 # Senda-Argus Hooks
 
-Senda-Argus Hooks is a hook-only observability SDK for LLM, MCP, and agent runtime audit events.
+Senda-Argus Hooks is a hook-only observability SDK for LLM, MCP, agent runtime, and RAG audit events.
 
 It collects normalized execution events from SDK hooks, monkey patches, and runtime hooks without requiring application-level `audit.event()` calls or business logic changes in agent applications.
 
@@ -13,7 +13,8 @@ The collected events are designed for downstream analysis, correlation, risk sco
 * LLM request and error event collection
 * MCP tool call request, completion, and failure event collection
 * Generic non-MCP tool call request, completion, and failure event collection
-* OpenAI Agents SDK, LangChain, and LangGraph integration examples
+* RAG retrieval, embedding, and query lifecycle event collection
+* OpenAI Agents SDK, LangChain, LangGraph, and LlamaIndex integration examples
 * Agent and PromptOps runtime event examples
 * JSONL, stdout, null, and Parquet exporters
 * Redaction and capture controls
@@ -36,6 +37,7 @@ The collected events are designed for downstream analysis, correlation, risk sco
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
 | LangGraph | Experimental | Stream wrapper / event stream integration | Real `StateGraph` stream smoke test | `agent.run.*`, `agent.step.*` |
+| LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | Fake component tests; `register(..., rag={...})` smoke test | `retrieval.*`, `embedding.*`, `rag.query.*` |
 | Built-in mock MCP client | Tested | Runtime hook example | Unit test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | PromptOps / Agent examples     | Tested as examples | Runtime hook example           | Unit test                      | `agent.decision`, `promptops.run.completed`                                  |
 | Built-in Ollama example client | Example            | Runtime hook example           | Example client hook            | `llm.request`, `llm.error`                                                   |
@@ -59,6 +61,7 @@ Senda-Argus Hooks separates low-level SDK hooks from framework integrations.
 | OpenAI Agents SDK | Experimental | Runner/tracing integration | v0.3.0 | Captures agent run lifecycle events and tracing-style spans |
 | LangChain | Experimental | Callback handler | v0.3.0 | Captures LLM, tool, chain, and agent callback events |
 | LangGraph | Experimental | Stream wrapper / event stream integration | v0.3.0 | Captures graph run and step events from streamed execution |
+| LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | v0.4.0 | Captures retrieval, embedding, and query lifecycle events |
 | Built-in mock MCP client | Tested | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | PromptOps examples | Tested as examples | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
 | Built-in Ollama example client | Example | Runtime hook example | v0.2.0 | Useful for local error-path checks |
@@ -83,6 +86,7 @@ The following versions were installed in a clean virtual environment and used fo
 | OpenAI Agents SDK | Installed in real SDK smoke test | Import/patch smoke test; invalid API key error-path test; verified `agent.run.started`, `agent.run.failed` | Experimental |
 | LangChain | Installed in real SDK smoke test | Real `CallbackManager` smoke test; verified `llm.request.started`, `llm.request`, `tool_call.requested`, `tool_call.completed` | Experimental |
 | LangGraph | Installed in real SDK smoke test | Real `StateGraph.stream` wrapper smoke test; verified `agent.run.started`, `agent.step.completed`, `agent.run.completed` | Experimental |
+| LlamaIndex / RAG | Optional / wrapper based | `register(..., rag={...})` smoke test; verified `retrieval.requested`, `retrieval.completed`, `embedding.requested`, `embedding.completed`, `rag.query.started`, `rag.query.completed`; `senda-hooks retrievals` verified | Experimental |
 | Built-in mock MCP client | packaged | Unit test and hook smoke test | Tested |
 | PromptOps examples | packaged | Unit test and hook smoke test | Tested |
 | Built-in Ollama example client | packaged | Error-path hook smoke test | Example |
@@ -179,6 +183,55 @@ Generic tool event data may include:
 
 Generic `tool_call.*` events are intended for tools that are not necessarily MCP tools, such as Python functions, HTTP APIs, shell commands, file operations, retrievers, browser actions, cloud APIs, and collaboration tools.
 
+### RAG retrieval and embedding events
+
+v0.4.0 adds RAG-oriented audit events for knowledge access. These events are intended to show what knowledge source was searched and what embedding/retrieval activity happened before an LLM response was generated.
+
+Typical RAG events include:
+
+* `retrieval.requested`
+* `retrieval.completed`
+* `retrieval.failed`
+* `embedding.requested`
+* `embedding.completed`
+* `embedding.failed`
+* `rag.query.started`
+* `rag.query.completed`
+* `rag.query.failed`
+
+Retrieval event data may include:
+
+* framework name
+* retriever name
+* retriever type
+* query hash
+* `top_k`
+* index name
+* collection name
+* vector store
+* result count
+* document ID hash
+* chunk ID hash
+* score min/max
+* `purpose_id`
+* latency
+* error details
+
+Embedding event data may include:
+
+* framework name
+* provider
+* model
+* input hash
+* input count
+* input length
+* vector dimension
+* vector count
+* vector hash
+* `purpose_id`
+
+Raw retrieval queries and embedding inputs follow the same capture/redaction controls as tool arguments. Raw retrieved results follow `capture_result`. Hashes are emitted by default for correlation without storing full content.
+
 ### Agent and framework runtime events
 
 Agent frameworks and runtime examples may emit:
@@ -249,7 +302,18 @@ For non-MCP tools, `purpose_id` can also be derived from framework/tool metadata
 * optional input schema hash
 * optional tool description hash
 
-This allows different agent implementations to be grouped together when they use the same MCP endpoint, tool capability, or framework-level tool profile.
+For RAG retrieval and embedding events, `purpose_id` can be derived from stable knowledge-access metadata such as:
+
+* framework name
+* retriever name
+* retriever type
+* index name
+* collection name
+* vector store
+* embedding provider
+* embedding model
+
+This allows different agent implementations to be grouped together when they use the same MCP endpoint, tool capability, framework-level tool profile, retriever/index, or embedding model.
 
 This is intended to answer:
 
@@ -307,7 +371,7 @@ python -m pip install -e ".[dev,parquet]"
 External framework SDKs are optional. Install only the packages you use in your application.
 
 ```bash
-python -m pip install openai-agents langchain langgraph
+python -m pip install openai-agents langchain langgraph llama-index-core
 ```
 
 Package names and versions may vary by project and release. Senda-Argus Hooks does not require these packages for the base installation or unit tests.
@@ -458,6 +522,115 @@ Typical events include:
 * `agent.run.completed`
 * `agent.run.failed`
 
+### LlamaIndex / RAG instrumentation
+
+LlamaIndex / RAG integration is experimental. The recommended v0.4.0 usage is to enable RAG instrumentation once from `register()`.
+
+This instruments only the component instances you pass in. It does not globally monkey patch LlamaIndex or other RAG frameworks.
+
+```python
+from senda_argus_hooks import register, shutdown
+
+register(
+    project="rag-app",
+    environment="dev",
+    exporters=[{"type": "jsonl", "path": "./logs/rag.jsonl"}],
+    capture_arguments=False,
+    capture_result=False,
+    redact=True,
+    rag={
+        "framework": "llamaindex",
+        "retriever": retriever,
+        "embed_model": embed_model,
+        "query_engine": query_engine,
+        "retriever_type": "vector",
+        "index_name": "security_knowledge_base",
+        "vector_store": "faiss",
+        "top_k": 5,
+        "provider": "local",
+    },
+)
+
+# Use your existing RAG code normally.
+# The passed component instances are instrumented.
+result = retriever.retrieve("CVE-2024-3094")
+vector = embed_model.get_text_embedding("CVE-2024-3094")
+answer = query_engine.query("CVE-2024-3094")
+
+shutdown()
+```
+
+If you prefer to keep registration and RAG instrumentation separate, use `instrument_rag()`.
+
+```python
+from senda_argus_hooks import register, shutdown
+from senda_argus_hooks.integrations import instrument_rag
+
+register(
+    project="rag-app",
+    environment="dev",
+    exporters=[{"type": "jsonl", "path": "./logs/rag.jsonl"}],
+    capture_arguments=False,
+    capture_result=False,
+    redact=True,
+)
+
+instrument_rag(
+    framework="llamaindex",
+    retriever=retriever,
+    embed_model=embed_model,
+    query_engine=query_engine,
+    retriever_type="vector",
+    index_name="security_knowledge_base",
+    vector_store="faiss",
+    top_k=5,
+    provider="local",
+)
+
+answer = query_engine.query("CVE-2024-3094")
+
+shutdown()
+```
+
+Lower-level wrapper helpers are also available when you want to instrument a single operation explicitly.
+
+```python
+from senda_argus_hooks.integrations import (
+    embed_text_with_argus,
+    query_with_argus,
+    retrieve_with_argus,
+)
+
+result = retrieve_with_argus(
+    retriever,
+    "CVE-2024-3094",
+    retriever_type="vector",
+    index_name="security_knowledge_base",
+    vector_store="faiss",
+    top_k=5,
+)
+vector = embed_text_with_argus(embed_model, "CVE-2024-3094")
+answer = query_with_argus(query_engine, "CVE-2024-3094")
+```
+
+Typical events include:
+
+* `retrieval.requested`
+* `retrieval.completed`
+* `retrieval.failed`
+* `embedding.requested`
+* `embedding.completed`
+* `embedding.failed`
+* `rag.query.started`
+* `rag.query.completed`
+* `rag.query.failed`
+
+For callback-style usage, the package also provides:
+
+```python
+from senda_argus_hooks.integrations import SendaArgusLlamaIndexCallbackHandler
+```
+
 ## Exporters
 
 ### JSONL exporter
@@ -523,8 +696,8 @@ Common controls:
 | ------------------- | ----------------------------------------------------- |
 | `capture_prompt`    | Capture LLM prompt or message payloads when supported |
 | `capture_response`  | Capture LLM response payloads when supported          |
-| `capture_arguments` | Capture MCP and generic tool arguments                |
-| `capture_result`    | Capture MCP and generic tool results                  |
+| `capture_arguments` | Capture MCP, generic tool, retrieval query, and embedding input payloads |
+| `capture_result`    | Capture MCP, generic tool, retrieval result, and RAG query results |
 | `redact`            | Apply redaction to configured sensitive values        |
 
 When body capture is disabled, hashes are still useful for correlation without storing raw content.
@@ -565,6 +738,12 @@ senda-hooks tools ./logs/events.jsonl
 
 ```bash
 senda-hooks stats ./logs/events.jsonl
+```
+
+### Summarize RAG retrieval and embedding usage
+
+```bash
+senda-hooks retrievals ./logs/events.jsonl
 ```
 
 ### Convert JSONL to Parquet
@@ -658,6 +837,19 @@ mcp.tool_call.completed
 promptops.run.completed
 ```
 
+## Real SDK smoke test status
+
+The following smoke tests were verified in a clean virtual environment.
+
+| Target | Result | Verified events |
+|---|---|---|
+| OpenAI Agents SDK | Passed with invalid API key error-path test | `agent.run.started`, `agent.run.failed` |
+| LangChain | Passed with real `CallbackManager` | `llm.request.started`, `llm.request`, `tool_call.requested`, `tool_call.completed` |
+| LangGraph | Passed with real `StateGraph.stream` wrapper | `agent.run.started`, `agent.step.completed`, `agent.run.completed` |
+| RAG instrumentation | Passed with `register(..., rag={...})` component instrumentation | `retrieval.requested`, `retrieval.completed`, `embedding.requested`, `embedding.completed`, `rag.query.started`, `rag.query.completed` |
+| RAG CLI summary | Passed with `senda-hooks retrievals` | Retriever and embedding summary output |
+
+
 ## Development
 
 ### Run lint
@@ -676,7 +868,8 @@ pytest -q -rs
 
 ```bash
 python -m pip install build twine
-rm -rf dist build *.egg-info
+rm -rf dist build
+find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 
 python -m build
 python -m twine check dist/*
@@ -704,15 +897,17 @@ The test suite covers:
 * fake OpenAI Agents SDK integration behavior
 * fake LangChain callback handler behavior
 * fake LangGraph stream wrapper behavior
+* fake LlamaIndex retrieval, embedding, query, and callback-style helper behavior
 * generic `tool_call.*` events for non-MCP tools
+* generic `retrieval.*`, `embedding.*`, and `rag.query.*` events for RAG flows
 * PromptOps and built-in mock runtime events
 
 Tests do not require external API keys.
 
-The v0.3.0 test suite is expected to pass with:
+The v0.4.0 test suite is expected to pass with:
 
 ```text
-20 passed
+31 passed
 ```
 
 ## Release verification
@@ -738,7 +933,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install /path/to/senda_argus_hooks-0.3.0-py3-none-any.whl
+python -m pip install /path/to/senda_argus_hooks-0.4.0-py3-none-any.whl
 
 senda-hooks --help
 ```
@@ -809,6 +1004,16 @@ ls -l logs/argus/events.jsonl
 ```
 
 For a quick test, run the smoke test in this README.
+
+### RAG events do not emit retrieval or embedding events
+
+Check that:
+
+* `register(..., rag={...})` or `instrument_rag(...)` was called before using the RAG component instances
+* the same retriever, embedding model, or query engine instances passed to instrumentation are the ones used by the application
+* the object exposes the expected method, such as `retrieve`, `aretrieve`, `get_text_embedding`, `get_text_embeddings`, `query`, or `aquery`
+* `shutdown()` is called for short-lived scripts
+* the exporter path is writable
 
 ### External SDK hooks do not emit events
 

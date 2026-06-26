@@ -117,6 +117,54 @@ def derive_tool_purpose_id(
     )
 
 
+def derive_retrieval_purpose_id(
+    *,
+    framework: str | None = None,
+    retriever_name: str | None = None,
+    retriever_type: str | None = None,
+    index_name: str | None = None,
+    collection_name: str | None = None,
+    vector_store: str | None = None,
+    target: str | None = None,
+) -> str:
+    """Derive a stable purpose id for RAG retrieval/index access.
+
+    This id intentionally avoids per-query text so repeated access to the same
+    retriever/index groups together across agent implementations.
+    """
+    return stable_hash(
+        {
+            "framework": framework or "unknown",
+            "retriever_name": retriever_name or "unknown",
+            "retriever_type": retriever_type or "unknown",
+            "index_name": index_name or "unknown",
+            "collection_name": collection_name or "unknown",
+            "vector_store": vector_store or "unknown",
+            "target": normalize_url(target) if target else None,
+        },
+        prefix="purpose",
+    )
+
+
+def derive_embedding_purpose_id(
+    *,
+    framework: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    embedding_type: str | None = None,
+) -> str:
+    """Derive a stable purpose id for embedding generation/use."""
+    return stable_hash(
+        {
+            "framework": framework or "unknown",
+            "provider": provider or "unknown",
+            "model": model or "unknown",
+            "embedding_type": embedding_type or "text",
+        },
+        prefix="purpose",
+    )
+
+
 def runtime_metadata() -> dict[str, Any]:
     return {
         "hostname": socket.gethostname(),

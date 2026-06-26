@@ -151,6 +151,80 @@ def cmd_tools(args) -> int:
     return 0
 
 
+
+def cmd_retrievals(args) -> int:
+    events = read_events(Path(args.path))
+    retrievals: dict[str, dict[str, Any]] = {}
+    embeddings: dict[str, dict[str, Any]] = {}
+    for event in events:
+        data = event.get("data") or {}
+        retrieval = data.get("retrieval") or {}
+        embedding = data.get("embedding") or {}
+        if retrieval:
+            key = "::".join(
+                [
+                    str(retrieval.get("framework") or "unknown"),
+                    str(retrieval.get("retriever_name") or "unknown"),
+                    str(retrieval.get("index_name") or retrieval.get("collection_name") or "unknown"),
+                ]
+            )
+            entry = retrievals.setdefault(
+                key,
+                {
+                    "framework": retrieval.get("framework"),
+                    "retriever_name": retrieval.get("retriever_name"),
+                    "retriever_type": retrieval.get("retriever_type"),
+                    "index_name": retrieval.get("index_name"),
+                    "collection_name": retrieval.get("collection_name"),
+                    "vector_store": retrieval.get("vector_store"),
+                    "count": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "result_count_total": 0,
+                    "latency_ms_total": 0,
+                    "latency_ms_count": 0,
+                    "purpose_ids": set(),
+                },
+            )
+            entry["count"] += 1
+            if event.get("event_type") == "retrieval.completed":
+                entry["completed"] += 1
+                if retrieval.get("result_count") is not None:
+                    entry["result_count_total"] += int(retrieval.get("result_count") or 0)
+            if event.get("event_type") == "retrieval.failed":
+                entry["failed"] += 1
+            if event.get("latency_ms") is not None:
+                entry["latency_ms_total"] += int(event.get("latency_ms") or 0)
+                entry["latency_ms_count"] += 1
+            if retrieval.get("purpose_id"):
+                entry["purpose_ids"].add(retrieval.get("purpose_id"))
+        if embedding:
+            key = "::".join([str(embedding.get("framework") or "unknown"), str(embedding.get("provider") or "unknown"), str(embedding.get("model") or "unknown")])
+            entry = embeddings.setdefault(key, {"framework": embedding.get("framework"), "provider": embedding.get("provider"), "model": embedding.get("model"), "count": 0, "completed": 0, "failed": 0, "purpose_ids": set()})
+            entry["count"] += 1
+            if event.get("event_type") == "embedding.completed":
+                entry["completed"] += 1
+            if event.get("event_type") == "embedding.failed":
+                entry["failed"] += 1
+            if embedding.get("purpose_id"):
+                entry["purpose_ids"].add(embedding.get("purpose_id"))
+    retrieval_rows = []
+    for entry in retrievals.values():
+        completed = int(entry["completed"] or 0)
+        latency_count = int(entry["latency_ms_count"] or 0)
+        retrieval_rows.append(
+            {
+                **{k: v for k, v in entry.items() if not k.endswith("_total") and k not in {"latency_ms_count", "purpose_ids"}},
+                "avg_result_count": (entry["result_count_total"] / completed) if completed else None,
+                "avg_latency_ms": (entry["latency_ms_total"] / latency_count) if latency_count else None,
+                "purpose_ids": sorted(entry["purpose_ids"]),
+            }
+        )
+    embedding_rows = [{**entry, "purpose_ids": sorted(entry["purpose_ids"])} for entry in embeddings.values()]
+    print(json.dumps({"retrievals": retrieval_rows, "embeddings": embedding_rows}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_stats(args) -> int:
     events = read_events(Path(args.path))
     by_type: dict[str, int] = {}
@@ -170,6 +244,9 @@ def _brief_event(event: dict[str, Any]) -> dict[str, Any]:
     data = event.get("data") or {}
     mcp = data.get("mcp") or {}
     llm = data.get("llm") or {}
+    tool = data.get("tool") or {}
+    retrieval = data.get("retrieval") or {}
+    embedding = data.get("embedding") or {}
     return {
         "timestamp": event.get("timestamp"),
         "event_type": event.get("event_type"),
@@ -178,9 +255,11 @@ def _brief_event(event: dict[str, Any]) -> dict[str, Any]:
         "parent_span_id": event.get("parent_span_id"),
         "agent_id": event.get("agent_id"),
         "purpose_id": event.get("purpose_id"),
-        "tool": mcp.get("tool"),
+        "tool": mcp.get("tool") or tool.get("tool_name"),
         "server": mcp.get("server"),
-        "model": llm.get("model"),
+        "model": llm.get("model") or embedding.get("model"),
+        "retriever": retrieval.get("retriever_name"),
+        "index": retrieval.get("index_name") or retrieval.get("collection_name"),
         "latency_ms": event.get("latency_ms"),
     }
 
@@ -216,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
     tools_p = sub.add_parser("tools", help="Summarize MCP tool usage")
     tools_p.add_argument("path")
     tools_p.set_defaults(func=cmd_tools)
+
+
+    retrievals_p = sub.add_parser("retrievals", help="Summarize RAG retrieval and embedding usage")
+    retrievals_p.add_argument("path")
+    retrievals_p.set_defaults(func=cmd_retrievals)
 
     stats_p = sub.add_parser("stats", help="Summarize events, agents, and purposes")
     stats_p.add_argument("path")

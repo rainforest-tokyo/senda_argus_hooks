@@ -12,6 +12,7 @@ from senda_argus_hooks.instrumentors import AnthropicInstrumentor, ArgusSDKInstr
 from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
 
 _ACTIVE_INSTRUMENTORS: list[Any] = []
+_ACTIVE_RAG_INSTRUMENTATIONS: list[Any] = []
 
 
 def register(
@@ -26,6 +27,7 @@ def register(
     instrument_mcp: bool = True,
     instrument_argus_sdk: bool = True,
     instrument_openai_agents: bool = True,
+    rag: dict[str, Any] | None = None,
     capture_prompt: bool = True,
     capture_response: bool = True,
     capture_arguments: bool = True,
@@ -86,7 +88,19 @@ def register(
             installed["argus_sdk"] = _activate(ArgusSDKInstrumentor())
         if instrument_openai_agents:
             installed["openai_agents"] = _activate(OpenAIAgentsInstrumentor())
-    return {"project": project, "environment": environment, "instrumentors": installed}
+
+    rag_handle = None
+    if rag:
+        try:
+            from senda_argus_hooks.integrations import instrument_rag
+
+            rag_handle = instrument_rag(**rag)
+            _ACTIVE_RAG_INSTRUMENTATIONS.append(rag_handle)
+            installed["rag"] = bool(rag_handle.installed())
+        except Exception:
+            installed["rag"] = False
+
+    return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
 
 
 def _activate(instrumentor) -> bool:
@@ -105,6 +119,12 @@ def flush() -> None:
 
 def shutdown() -> None:
     flush()
+    for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):
+        try:
+            rag_handle.uninstrument()
+        except Exception:
+            pass
+    _ACTIVE_RAG_INSTRUMENTATIONS.clear()
     for instrumentor in list(_ACTIVE_INSTRUMENTORS):
         try:
             instrumentor.uninstrument()

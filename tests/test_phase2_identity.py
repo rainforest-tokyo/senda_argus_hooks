@@ -3,7 +3,7 @@ from pathlib import Path
 
 from senda_argus_hooks import register, shutdown
 from senda_argus_hooks.sdk import MockMCPClient
-from senda_argus_hooks.core.identity import derive_purpose_id
+from senda_argus_hooks.core.identity import derive_embedding_purpose_id, derive_purpose_id, derive_retrieval_purpose_id
 
 
 def test_phase2_schema_identity_fields(tmp_path: Path):
@@ -26,3 +26,17 @@ def test_purpose_id_groups_same_mcp_capability():
     one = derive_purpose_id(mcp_server_name="nexus-mcp", mcp_server_url="https://example.com/mcp/", tool_name="lookup", capability="triage")
     two = derive_purpose_id(mcp_server_name="nexus-mcp", mcp_server_url="https://EXAMPLE.com/mcp", tool_name="lookup", capability="triage")
     assert one == two
+
+
+def test_retrieval_purpose_id_groups_same_index_access():
+    one = derive_retrieval_purpose_id(framework="llamaindex", retriever_name="kb", retriever_type="vector", index_name="security", vector_store="faiss")
+    two = derive_retrieval_purpose_id(framework="llamaindex", retriever_name="kb", retriever_type="vector", index_name="security", vector_store="faiss")
+    assert one == two
+    assert one.startswith("purpose_")
+
+
+def test_embedding_purpose_id_groups_same_model():
+    one = derive_embedding_purpose_id(framework="llamaindex", provider="local", model="bge-small")
+    two = derive_embedding_purpose_id(framework="llamaindex", provider="local", model="bge-small")
+    assert one == two
+    assert one.startswith("purpose_")
