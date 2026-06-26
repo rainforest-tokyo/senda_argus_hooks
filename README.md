@@ -12,6 +12,8 @@ The collected events are designed for downstream analysis, correlation, risk sco
 * No required `audit.event()` calls in application logic
 * LLM request and error event collection
 * MCP tool call request, completion, and failure event collection
+* Generic non-MCP tool call request, completion, and failure event collection
+* OpenAI Agents SDK, LangChain, and LangGraph integration examples
 * Agent and PromptOps runtime event examples
 * JSONL, stdout, null, and Parquet exporters
 * Redaction and capture controls
@@ -31,11 +33,40 @@ The collected events are designed for downstream analysis, correlation, risk sco
 | Anthropic SDK                  | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | LiteLLM                        | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
-| Built-in mock MCP client       | Tested             | Runtime hook example           | Unit test                      | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
+| OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
+| LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
+| LangGraph | Experimental | Stream wrapper / event stream integration | Real `StateGraph` stream smoke test | `agent.run.*`, `agent.step.*` |
+| Built-in mock MCP client | Tested | Runtime hook example | Unit test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
 | PromptOps / Agent examples     | Tested as examples | Runtime hook example           | Unit test                      | `agent.decision`, `promptops.run.completed`                                  |
 | Built-in Ollama example client | Example            | Runtime hook example           | Example client hook            | `llm.request`, `llm.error`                                                   |
 
 External SDK integrations are marked as experimental because SDK internal class names and method locations may change between releases. The repository includes fake SDK compatibility tests to validate hook behavior without requiring real API keys.
+
+## Integration status
+
+Senda-Argus Hooks separates low-level SDK hooks from framework integrations.
+
+* SDK hooks use method hooks or monkey patches where appropriate.
+* Framework integrations use callback handlers, stream wrappers, or best-effort runner hooks.
+* External framework packages are optional and are not required by the base installation.
+
+| Integration | Status | Integration type | Introduced | Notes |
+|---|---|---|---:|---|
+| OpenAI SDK | Experimental | SDK method hook / monkey patch | v0.2.0 | Captures `llm.request` and `llm.error` where supported |
+| Anthropic SDK | Experimental | SDK method hook / monkey patch | v0.2.0 | Captures `llm.request` and `llm.error` where supported |
+| LiteLLM | Experimental | SDK method hook / monkey patch | v0.2.0 | Wrapper SDKs may also invoke lower-level provider SDKs |
+| MCP Python SDK | Experimental | Client/session hook | v0.2.0 | Captures MCP `ClientSession.call_tool` lifecycle events |
+| OpenAI Agents SDK | Experimental | Runner/tracing integration | v0.3.0 | Captures agent run lifecycle events and tracing-style spans |
+| LangChain | Experimental | Callback handler | v0.3.0 | Captures LLM, tool, chain, and agent callback events |
+| LangGraph | Experimental | Stream wrapper / event stream integration | v0.3.0 | Captures graph run and step events from streamed execution |
+| Built-in mock MCP client | Tested | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
+| PromptOps examples | Tested as examples | Runtime hook example | v0.2.0 | Used for local tests and smoke tests |
+| Built-in Ollama example client | Example | Runtime hook example | v0.2.0 | Useful for local error-path checks |
+
+Real API success-path tests for OpenAI, Anthropic, and LiteLLM require valid provider API keys. Public tests do not require external API keys. Error-path tests with invalid credentials are useful for confirming that SDK hooks emit `llm.error` events.
+
+When multiple SDK hooks are enabled at the same time, wrapper SDKs such as LiteLLM may also call lower-level provider SDKs. In that case, multiple events may be emitted for a single application-level request. Disable lower-level hooks if you only want wrapper-level events.
+
 
 ## Tested SDK versions
 
@@ -49,6 +80,9 @@ The following versions were installed in a clean virtual environment and used fo
 | Anthropic SDK | 0.112.0 | Import/patch smoke test; real SDK error-path hook test with `AuthenticationError` | Experimental |
 | LiteLLM | 1.83.7 | Import/patch smoke test; real SDK error-path hook test with provider authentication failure | Experimental |
 | MCP Python SDK | 1.28.0 | Import/patch smoke test; fake `ClientSession` unit test; built-in mock MCP hook smoke test | Experimental |
+| OpenAI Agents SDK | Installed in real SDK smoke test | Import/patch smoke test; invalid API key error-path test; verified `agent.run.started`, `agent.run.failed` | Experimental |
+| LangChain | Installed in real SDK smoke test | Real `CallbackManager` smoke test; verified `llm.request.started`, `llm.request`, `tool_call.requested`, `tool_call.completed` | Experimental |
+| LangGraph | Installed in real SDK smoke test | Real `StateGraph.stream` wrapper smoke test; verified `agent.run.started`, `agent.step.completed`, `agent.run.completed` | Experimental |
 | Built-in mock MCP client | packaged | Unit test and hook smoke test | Tested |
 | PromptOps examples | packaged | Unit test and hook smoke test | Tested |
 | Built-in Ollama example client | packaged | Error-path hook smoke test | Example |
@@ -122,6 +156,47 @@ MCP event data may include:
 * latency
 * error details
 
+### Generic tool call events
+
+Non-MCP tools from agent frameworks such as OpenAI Agents SDK, LangChain, and LangGraph may emit generic tool call lifecycle events:
+
+* `tool_call.requested`
+* `tool_call.completed`
+* `tool_call.failed`
+
+Generic tool event data may include:
+
+* framework name
+* tool name
+* tool type
+* operation
+* target
+* arguments hash
+* result hash
+* `purpose_id`
+* latency
+* error details
+
+Generic `tool_call.*` events are intended for tools that are not necessarily MCP tools, such as Python functions, HTTP APIs, shell commands, file operations, retrievers, browser actions, cloud APIs, and collaboration tools.
+
+### Agent and framework runtime events
+
+Agent frameworks and runtime examples may emit:
+
+* `agent.run.started`
+* `agent.run.completed`
+* `agent.run.failed`
+* `agent.step.started`
+* `agent.step.completed`
+* `agent.step.failed`
+* `agent.decision`
+* `agent.handoff.started`
+* `agent.handoff.completed`
+* `promptops.run.completed`
+* `promptops.error`
+
+These events are useful for reconstructing agent execution flow, graph steps, callback activity, tool usage, and final run completion.
+
 ### Agent and PromptOps events
 
 Agent and PromptOps examples may emit:
@@ -164,7 +239,17 @@ It is derived from MCP-related metadata such as:
 * optional tool schema hash
 * optional tool description hash
 
-This allows different agent implementations to be grouped together when they use the same MCP endpoint and tool capability.
+For non-MCP tools, `purpose_id` can also be derived from framework/tool metadata such as:
+
+* framework name
+* tool name
+* tool type
+* operation
+* target
+* optional input schema hash
+* optional tool description hash
+
+This allows different agent implementations to be grouped together when they use the same MCP endpoint, tool capability, or framework-level tool profile.
 
 This is intended to answer:
 
@@ -217,6 +302,16 @@ python -m pip install -e ".[parquet]"
 python -m pip install -e ".[dev,parquet]"
 ```
 
+### Optional framework SDKs
+
+External framework SDKs are optional. Install only the packages you use in your application.
+
+```bash
+python -m pip install openai-agents langchain langgraph
+```
+
+Package names and versions may vary by project and release. Senda-Argus Hooks does not require these packages for the base installation or unit tests.
+
 ## Basic usage
 
 Register hooks near the application entry point.
@@ -259,6 +354,109 @@ register(auto_instrument=True)
 ```
 
 Avoid adding audit-specific calls to agent business logic unless you explicitly want custom application events.
+
+## Framework integrations
+
+### OpenAI Agents SDK
+
+OpenAI Agents SDK integration is experimental.
+
+When `auto_instrument=True` is enabled, Senda-Argus Hooks attempts a best-effort patch of supported OpenAI Agents SDK runner methods when the SDK is installed.
+
+```python
+from senda_argus_hooks import register, shutdown
+
+register(
+    project="openai-agents-app",
+    environment="dev",
+    auto_instrument=True,
+    exporters=[{"type": "jsonl", "path": "./logs/agents.jsonl"}],
+)
+
+# Run your normal OpenAI Agents SDK application here.
+
+shutdown()
+```
+
+For tracing-style integration, the package also provides:
+
+```python
+from senda_argus_hooks.integrations.openai_agents import SendaArgusOpenAIAgentsProcessor
+```
+
+The processor is designed to convert agent run, tool, handoff, and LLM spans into normalized Senda-Argus events where supported by the installed OpenAI Agents SDK version.
+
+### LangChain Callback Handler
+
+LangChain integration is experimental and uses a callback handler.
+
+```python
+from senda_argus_hooks import register, shutdown
+from senda_argus_hooks.integrations import SendaArgusCallbackHandler
+
+register(
+    project="langchain-app",
+    environment="dev",
+    exporters=[{"type": "jsonl", "path": "./logs/langchain.jsonl"}],
+)
+
+handler = SendaArgusCallbackHandler()
+
+# Pass handler to LangChain callbacks where supported by your chain, tool, model, or agent.
+# Example:
+# result = chain.invoke(input_data, config={"callbacks": [handler]})
+
+shutdown()
+```
+
+Typical events include:
+
+* `llm.request.started`
+* `llm.request`
+* `llm.error`
+* `tool_call.requested`
+* `tool_call.completed`
+* `tool_call.failed`
+* `agent.step.started`
+* `agent.step.completed`
+* `agent.decision`
+* `agent.run.completed`
+
+### LangGraph Stream Wrapper
+
+LangGraph integration is experimental and uses stream wrappers.
+
+```python
+from senda_argus_hooks import register, shutdown
+from senda_argus_hooks.integrations import stream_with_argus
+
+register(
+    project="langgraph-app",
+    environment="dev",
+    exporters=[{"type": "jsonl", "path": "./logs/langgraph.jsonl"}],
+)
+
+# for chunk in stream_with_argus(graph, input_data, stream_mode="updates"):
+#     print(chunk)
+
+shutdown()
+```
+
+Async usage:
+
+```python
+from senda_argus_hooks.integrations import astream_with_argus
+
+# async for chunk in astream_with_argus(graph, input_data, stream_mode="updates"):
+#     print(chunk)
+```
+
+Typical events include:
+
+* `agent.run.started`
+* `agent.step.completed`
+* `agent.run.completed`
+* `agent.run.failed`
 
 ## Exporters
 
@@ -325,8 +523,8 @@ Common controls:
 | ------------------- | ----------------------------------------------------- |
 | `capture_prompt`    | Capture LLM prompt or message payloads when supported |
 | `capture_response`  | Capture LLM response payloads when supported          |
-| `capture_arguments` | Capture MCP tool arguments                            |
-| `capture_result`    | Capture MCP tool results                              |
+| `capture_arguments` | Capture MCP and generic tool arguments                |
+| `capture_result`    | Capture MCP and generic tool results                  |
 | `redact`            | Apply redaction to configured sensitive values        |
 
 When body capture is disabled, hashes are still useful for correlation without storing raw content.
@@ -503,9 +701,19 @@ The test suite covers:
 * fake Anthropic SDK hook behavior
 * fake LiteLLM hook behavior
 * fake MCP Python SDK hook behavior
+* fake OpenAI Agents SDK integration behavior
+* fake LangChain callback handler behavior
+* fake LangGraph stream wrapper behavior
+* generic `tool_call.*` events for non-MCP tools
 * PromptOps and built-in mock runtime events
 
 Tests do not require external API keys.
+
+The v0.3.0 test suite is expected to pass with:
+
+```text
+20 passed
+```
 
 ## Release verification
 
@@ -530,7 +738,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install /path/to/senda_argus_hooks-0.2.0-py3-none-any.whl
+python -m pip install /path/to/senda_argus_hooks-0.3.0-py3-none-any.whl
 
 senda-hooks --help
 ```

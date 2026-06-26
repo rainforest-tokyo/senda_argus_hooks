@@ -88,6 +88,35 @@ def derive_mcp_profile_id(*, mcp_server_name: str | None = None, mcp_server_url:
     )
 
 
+def derive_tool_purpose_id(
+    *,
+    framework: str | None = None,
+    tool_name: str | None = None,
+    tool_type: str | None = None,
+    operation: str | None = None,
+    target: str | None = None,
+    tool_schema_hash: str | None = None,
+    tool_description_hash: str | None = None,
+) -> str:
+    """Derive a stable purpose id for non-MCP framework tools.
+
+    This is intentionally based on stable tool metadata instead of per-call
+    arguments, so calls with the same capability group together across agents.
+    """
+    return stable_hash(
+        {
+            "framework": framework or "unknown",
+            "tool_name": tool_name or "unknown",
+            "tool_type": tool_type or "unknown",
+            "operation": operation or "unknown",
+            "target": normalize_url(target) if target else None,
+            "tool_schema_hash": tool_schema_hash,
+            "tool_description_hash": tool_description_hash,
+        },
+        prefix="purpose",
+    )
+
+
 def runtime_metadata() -> dict[str, Any]:
     return {
         "hostname": socket.gethostname(),

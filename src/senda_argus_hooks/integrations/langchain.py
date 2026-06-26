@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from senda_argus_hooks.core.hashing import sha256_value
+from senda_argus_hooks.core.identity import derive_tool_purpose_id
+from senda_argus_hooks.core.runtime import emit_event, get_config
+
+try:  # Optional dependency. Unit tests use this module without LangChain installed.
+    from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
+except Exception:  # pragma: no cover - depends on optional dependency availability
+    _BaseCallbackHandler = object
+
+
+class SendaArgusCallbackHandler(_BaseCallbackHandler):
+    """LangChain callback handler that emits normalized Senda-Argus events.
+
+    The handler is intentionally optional and does not make LangChain a hard
+    dependency. Add it to LangChain callback configuration when you want to
+    capture framework-level events without application-level audit calls.
+    """
+
+    def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
+        try:
+            super().__init__()
+        except TypeError:
+            pass
+        self.framework = framework
+        self.capture_payloads = capture_payloads
+        self._starts: dict[str, float] = {}
+
+    def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        self._starts[run_id] = time.perf_counter()
+        payload = {"serialized": serialized, "prompts": prompts, "kwargs": _safe_kwargs(kwargs)}
+        emit_event(
+            "llm.request.started",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_llm_start"},
+            data={"llm": _payload_or_hash("input", payload, self._capture_prompt())},
+            status="start",
+        )
+
+    def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        self._starts[run_id] = time.perf_counter()
+        payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
+        emit_event(
+            "llm.request.started",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_chat_model_start"},
+            data={"llm": _payload_or_hash("input", payload, self._capture_prompt())},
+            status="start",
+        )
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        payload = _safe_value(response)
+        emit_event(
+            "llm.request",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
+            data={"llm": _payload_or_hash("output", payload, self._capture_response())},
+            status="success",
+            latency_ms=latency_ms,
+        )
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        emit_event(
+            "llm.error",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_llm_error"},
+            data={"llm": {"run_id": str(kwargs.get("run_id")) if kwargs.get("run_id") else None}},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": error.__class__.__name__, "message": str(error)},
+        )
+
+    def on_tool_start(self, serialized: dict[str, Any], input_str: str | dict[str, Any] | None = None, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        self._starts[run_id] = time.perf_counter()
+        tool_name = _tool_name(serialized, kwargs)
+        tool_type = _tool_type(serialized, kwargs)
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
+        tool = {
+            "framework": self.framework,
+            "tool_name": tool_name,
+            "tool_type": tool_type,
+            "purpose_id": purpose_id,
+            "arguments_hash": sha256_value(input_str),
+        }
+        if get_config().capture_arguments:
+            tool["arguments"] = input_str
+        emit_event(
+            "tool_call.requested",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_tool_start"},
+            data={"tool": tool},
+            status="start",
+            purpose_id=purpose_id,
+        )
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        tool = {
+            "framework": self.framework,
+            "tool_name": tool_name,
+            "tool_type": "unknown",
+            "purpose_id": purpose_id,
+            "result_hash": sha256_value(output),
+        }
+        if get_config().capture_result:
+            tool["result"] = _safe_value(output)
+        emit_event(
+            "tool_call.completed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_tool_end"},
+            data={"tool": tool},
+            status="success",
+            latency_ms=latency_ms,
+            purpose_id=purpose_id,
+        )
+
+    def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        emit_event(
+            "tool_call.failed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_tool_error"},
+            data={"tool": {"framework": self.framework, "tool_name": tool_name, "tool_type": "unknown", "purpose_id": purpose_id}},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": error.__class__.__name__, "message": str(error)},
+            purpose_id=purpose_id,
+        )
+
+    def on_chain_start(self, serialized: dict[str, Any], inputs: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        self._starts[run_id] = time.perf_counter()
+        emit_event(
+            "agent.step.started",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_chain_start"},
+            data={"agent": {"step_type": "chain", "name": _serialized_name(serialized), "input_hash": sha256_value(inputs)}},
+            status="start",
+        )
+
+    def on_chain_end(self, outputs: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        emit_event(
+            "agent.step.completed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_chain_end"},
+            data={"agent": {"step_type": "chain", "output_hash": sha256_value(outputs)}},
+            status="success",
+            latency_ms=latency_ms,
+        )
+
+    def on_chain_error(self, error: BaseException, **kwargs: Any) -> None:
+        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        emit_event(
+            "agent.step.failed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_chain_error"},
+            data={"agent": {"step_type": "chain"}},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": error.__class__.__name__, "message": str(error)},
+        )
+
+    def on_agent_action(self, action: Any, **kwargs: Any) -> None:
+        emit_event(
+            "agent.decision",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_agent_action"},
+            data={"agent": {"action": _safe_value(action), "kwargs": _safe_kwargs(kwargs)}},
+            status="success",
+        )
+
+    def on_agent_finish(self, finish: Any, **kwargs: Any) -> None:
+        emit_event(
+            "agent.run.completed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_agent_finish"},
+            data={"agent": {"finish": _safe_value(finish), "kwargs": _safe_kwargs(kwargs)}},
+            status="success",
+        )
+
+    def _capture_prompt(self) -> bool:
+        return get_config().capture_prompt if self.capture_payloads is None else self.capture_payloads
+
+    def _capture_response(self) -> bool:
+        return get_config().capture_response if self.capture_payloads is None else self.capture_payloads
+
+
+def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:
+    return {key: _safe_value(value)} if capture else {f"{key}_hash": sha256_value(value)}
+
+
+def _run_key(kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("run_id") or kwargs.get("parent_run_id") or "default")
+
+
+def _latency_ms(start: float | None) -> int | None:
+    return int((time.perf_counter() - start) * 1000) if start is not None else None
+
+
+def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {k: str(v) if k.endswith("_id") else _safe_value(v) for k, v in kwargs.items() if k not in {"callbacks", "manager"}}
+
+
+def _safe_value(value: Any) -> Any:
+    for attr in ("model_dump", "dict"):
+        if hasattr(value, attr):
+            try:
+                return getattr(value, attr)()
+            except Exception:
+                pass
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_safe_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _safe_value(v) for k, v in value.items()}
+    return str(value)
+
+
+def _serialized_name(serialized: dict[str, Any] | None) -> str | None:
+    if not serialized:
+        return None
+    return serialized.get("name") or serialized.get("id") or serialized.get("repr")
+
+
+def _tool_name(serialized: dict[str, Any] | None, kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("name") or kwargs.get("tool") or _serialized_name(serialized) or "unknown")
+
+
+def _tool_type(serialized: dict[str, Any] | None, kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("tool_type") or (serialized or {}).get("tool_type") or "function")

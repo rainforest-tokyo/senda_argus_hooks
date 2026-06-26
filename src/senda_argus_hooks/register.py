@@ -9,6 +9,7 @@ from senda_argus_hooks.core.queue import EventBus
 from senda_argus_hooks.core.runtime import configure, get_bus
 from senda_argus_hooks.exporters.registry import create_exporter
 from senda_argus_hooks.instrumentors import AnthropicInstrumentor, ArgusSDKInstrumentor, LiteLLMInstrumentor, MCPPythonInstrumentor, OpenAIInstrumentor
+from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
 
 _ACTIVE_INSTRUMENTORS: list[Any] = []
 
@@ -24,6 +25,7 @@ def register(
     instrument_litellm: bool = True,
     instrument_mcp: bool = True,
     instrument_argus_sdk: bool = True,
+    instrument_openai_agents: bool = True,
     capture_prompt: bool = True,
     capture_response: bool = True,
     capture_arguments: bool = True,
@@ -82,6 +84,8 @@ def register(
             installed["mcp_python"] = _activate(MCPPythonInstrumentor())
         if instrument_argus_sdk:
             installed["argus_sdk"] = _activate(ArgusSDKInstrumentor())
+        if instrument_openai_agents:
+            installed["openai_agents"] = _activate(OpenAIAgentsInstrumentor())
     return {"project": project, "environment": environment, "instrumentors": installed}
 
 
