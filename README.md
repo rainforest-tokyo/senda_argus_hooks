@@ -10,10 +10,6 @@ The collected events are designed for downstream analysis, correlation, risk sco
 > Certain concepts and techniques related to Senda-Argus, including AI agent execution trace collection, decision trace reconstruction, and runtime audit event correlation, are patent pending in Japan.
 > This notice does not change the terms of the Apache License 2.0 applicable to this repository.
 
-Patent Notice
-Certain concepts and techniques related to Senda-Argus, including AI agent execution trace collection, decision trace reconstruction, and runtime audit event correlation, are patent pending in Japan.
-This notice does not change the terms of the Apache License 2.0 applicable to this repository.
-
 ## Features
 
 * Hook-only event collection
