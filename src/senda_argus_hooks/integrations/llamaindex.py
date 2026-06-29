@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from senda_argus_hooks.core.hashing import sha256_value
-from senda_argus_hooks.core.identity import derive_embedding_purpose_id, derive_retrieval_purpose_id
+from senda_argus_hooks.core.identity import data_source_hash, derive_embedding_purpose_id, derive_rag_query_purpose_id, derive_retrieval_purpose_id, rag_data_source_profile
 from senda_argus_hooks.core.runtime import emit_event, get_config
 
 
@@ -452,7 +452,7 @@ def _call_query_engine_method_with_argus(
             error={"type": exc.__class__.__name__, "message": str(exc)},
         )
         raise
-    completed = {**data, "result_hash": sha256_value(result)}
+    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result)}
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -688,15 +688,65 @@ def query_with_argus(
     *args: Any,
     framework: str = "llamaindex",
     query_engine_name: str | None = None,
+    index_name: str | None = None,
+    collection_name: str | None = None,
+    vector_store: str | None = None,
+    data_source: str | None = None,
+    data_source_url: str | None = None,
+    target: str | None = None,
     method: str = "query",
     **kwargs: Any,
 ) -> Any:
     start = time.perf_counter()
+    engine_name = _name(query_engine, query_engine_name)
+    inferred = _query_engine_source_meta(query_engine)
+    meta = {
+        "index_name": index_name or inferred.get("index_name"),
+        "collection_name": collection_name or inferred.get("collection_name"),
+        "vector_store": vector_store or inferred.get("vector_store"),
+        "data_source": data_source or inferred.get("data_source"),
+        "data_source_url": data_source_url or inferred.get("data_source_url"),
+        "target": target,
+    }
+    purpose_profile = rag_data_source_profile(
+        framework=framework,
+        component_name=engine_name,
+        component_type=query_engine.__class__.__name__,
+        index_name=meta.get("index_name"),
+        collection_name=meta.get("collection_name"),
+        vector_store=meta.get("vector_store"),
+        data_source=meta.get("data_source"),
+        data_source_url=meta.get("data_source_url"),
+        target=meta.get("target"),
+    )
+    purpose_id = derive_rag_query_purpose_id(
+        framework=framework,
+        query_engine_name=engine_name,
+        query_engine_type=query_engine.__class__.__name__,
+        index_name=meta.get("index_name"),
+        collection_name=meta.get("collection_name"),
+        vector_store=meta.get("vector_store"),
+        data_source=meta.get("data_source"),
+        data_source_url=meta.get("data_source_url"),
+        target=meta.get("target"),
+    )
+    source_hash = data_source_hash(purpose_profile)
     data = {
         "framework": framework,
-        "query_engine": _name(query_engine, query_engine_name),
+        "query_engine": engine_name,
         "query_hash": sha256_value(query),
+        "index_name": meta.get("index_name"),
+        "collection_name": meta.get("collection_name"),
+        "vector_store": meta.get("vector_store"),
+        "data_source": meta.get("data_source"),
+        "data_source_url": meta.get("data_source_url"),
+        "target": meta.get("target"),
+        "purpose_id": purpose_id,
+        "purpose_source": "rag_data_source_hash",
+        "purpose_profile": purpose_profile,
+        "data_source_hash": source_hash,
     }
+    data = {k: v for k, v in data.items() if v is not None}
     if _capture_query():
         data["query"] = _safe_value(query)
     emit_event(
@@ -704,6 +754,7 @@ def query_with_argus(
         source={"component": "integration", "sdk": framework, "operation": method},
         data={"rag": data},
         status="start",
+        purpose_id=purpose_id,
     )
     try:
         result = getattr(query_engine, method)(query, *args, **kwargs)
@@ -715,9 +766,10 @@ def query_with_argus(
             status="error",
             latency_ms=_latency_ms(start),
             error={"type": exc.__class__.__name__, "message": str(exc)},
+            purpose_id=purpose_id,
         )
         raise
-    completed = {**data, "result_hash": sha256_value(result)}
+    completed = {**data, "result_hash": sha256_value(result), **_rag_context_hash_payload(result)}
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -726,8 +778,21 @@ def query_with_argus(
         data={"rag": completed},
         status="success",
         latency_ms=_latency_ms(start),
+        purpose_id=purpose_id,
     )
     return result
+
+
+def _query_engine_source_meta(query_engine: Any) -> dict[str, Any]:
+    retriever = getattr(query_engine, "retriever", None)
+    source = retriever if retriever is not None else query_engine
+    return {
+        "index_name": getattr(source, "index_name", None),
+        "collection_name": getattr(source, "collection_name", None) or getattr(source, "collection", None),
+        "vector_store": getattr(source, "vector_store", None),
+        "data_source": getattr(source, "data_source", None) or getattr(source, "source", None),
+        "data_source_url": getattr(source, "data_source_url", None) or getattr(source, "url", None) or getattr(source, "base_url", None),
+    }
 
 
 def _metadata(**kwargs: Any) -> dict[str, Any]:
@@ -735,7 +800,9 @@ def _metadata(**kwargs: Any) -> dict[str, Any]:
 
 
 def _retrieval_payload(framework: str, query: Any, meta: dict[str, Any]) -> dict[str, Any]:
+    purpose_profile = _retrieval_purpose_profile(framework, meta)
     purpose_id = _retrieval_purpose(framework, meta)
+    source_hash = data_source_hash(purpose_profile)
     payload = {
         "framework": framework,
         "retriever_name": meta.get("retriever_name") or "unknown",
@@ -745,8 +812,13 @@ def _retrieval_payload(framework: str, query: Any, meta: dict[str, Any]) -> dict
         "index_name": meta.get("index_name"),
         "collection_name": meta.get("collection_name"),
         "vector_store": meta.get("vector_store"),
+        "data_source": meta.get("data_source"),
+        "data_source_url": meta.get("data_source_url"),
         "target": meta.get("target"),
         "purpose_id": purpose_id,
+        "purpose_source": "rag_data_source_hash",
+        "purpose_profile": purpose_profile,
+        "data_source_hash": source_hash,
     }
     if _capture_query():
         payload["query"] = _safe_value(query)
@@ -776,7 +848,24 @@ def _retrieval_result_payload(framework: str, results: Any, meta: dict[str, Any]
 
 
 def _embedding_payload(framework: str, input_text: Any, meta: dict[str, Any]) -> dict[str, Any]:
-    purpose_id = derive_embedding_purpose_id(framework=framework, provider=meta.get("provider"), model=meta.get("model"), embedding_type="text")
+    purpose_profile = {
+        "source_type": "embedding",
+        "framework": framework,
+        "provider": meta.get("provider") or "unknown",
+        "model": meta.get("model") or "unknown",
+        "embedding_type": "text",
+        "data_source": meta.get("data_source"),
+        "data_source_url": meta.get("data_source_url"),
+    }
+    purpose_id = derive_embedding_purpose_id(
+        framework=framework,
+        provider=meta.get("provider"),
+        model=meta.get("model"),
+        embedding_type="text",
+        data_source=meta.get("data_source"),
+        data_source_url=meta.get("data_source_url"),
+    )
+    source_hash = data_source_hash(purpose_profile)
     payload = {
         "framework": framework,
         "provider": meta.get("provider"),
@@ -785,6 +874,9 @@ def _embedding_payload(framework: str, input_text: Any, meta: dict[str, Any]) ->
         "input_count": meta.get("input_count") or _input_count(input_text),
         "input_length": _input_length(input_text),
         "purpose_id": purpose_id,
+        "purpose_source": "embedding_data_source_hash",
+        "purpose_profile": {k: v for k, v in purpose_profile.items() if v is not None},
+        "data_source_hash": source_hash,
     }
     if _capture_query():
         payload["input"] = _safe_value(input_text)
@@ -803,6 +895,20 @@ def _embedding_result_payload(framework: str, vector: Any, meta: dict[str, Any])
     return {k: v for k, v in payload.items() if v is not None}
 
 
+def _retrieval_purpose_profile(framework: str, meta: dict[str, Any]) -> dict[str, Any]:
+    return rag_data_source_profile(
+        framework=framework,
+        component_name=meta.get("retriever_name"),
+        component_type=meta.get("retriever_type") or "retriever",
+        index_name=meta.get("index_name"),
+        collection_name=meta.get("collection_name"),
+        vector_store=meta.get("vector_store"),
+        data_source=meta.get("data_source"),
+        data_source_url=meta.get("data_source_url"),
+        target=meta.get("target"),
+    )
+
+
 def _retrieval_purpose(framework: str, meta: dict[str, Any]) -> str:
     return derive_retrieval_purpose_id(
         framework=framework,
@@ -811,6 +917,8 @@ def _retrieval_purpose(framework: str, meta: dict[str, Any]) -> str:
         index_name=meta.get("index_name"),
         collection_name=meta.get("collection_name"),
         vector_store=meta.get("vector_store"),
+        data_source=meta.get("data_source"),
+        data_source_url=meta.get("data_source_url"),
         target=meta.get("target"),
     )
 
@@ -951,6 +1059,29 @@ def _vector_count(vector: Any) -> int | None:
         return 1
     return None
 
+
+
+def _rag_context_hash_payload(result: Any) -> dict[str, Any]:
+    safe = _safe_value(result)
+    context = None
+    if isinstance(safe, dict):
+        context = safe.get("context")
+    if not isinstance(context, list):
+        return {}
+    context_hashes: list[dict[str, Any]] = []
+    for index, item in enumerate(context):
+        entry: dict[str, Any] = {
+            "index": index,
+            "context_hash": sha256_value(item),
+        }
+        if isinstance(item, str):
+            entry["context_length"] = len(item)
+        context_hashes.append(entry)
+    return {
+        "context_count": len(context),
+        "context_hash": sha256_value(context),
+        "context_hashes": context_hashes,
+    }
 
 def _safe_value(value: Any) -> Any:
     for attr in ("model_dump", "dict"):
