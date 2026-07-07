@@ -29,10 +29,12 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self.framework = framework
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
+        self._messages_hashes: dict[str, str] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
+        self._messages_hashes[run_id] = sha256_value(prompts)
         payload = {"serialized": serialized, "prompts": prompts, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -44,6 +46,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
+        self._messages_hashes[run_id] = sha256_value(messages)
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -53,12 +56,17 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        messages_hash = self._messages_hashes.pop(run_id, None)
         payload = _safe_value(response)
+        llm_data = _payload_or_hash("output", payload, self._capture_response())
+        if messages_hash:
+            llm_data["messages_hash"] = messages_hash
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
-            data={"llm": _payload_or_hash("output", payload, self._capture_response())},
+            data={"llm": llm_data},
             status="success",
             latency_ms=latency_ms,
         )

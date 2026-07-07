@@ -53,18 +53,19 @@ class OpenAIInstrumentor(BaseInstrumentor):
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                llm_data: dict[str, Any] = {
+                    "provider": "openai",
+                    "operation": operation,
+                    "model": kwargs.get("model"),
+                    "input": input_payload,
+                    "output": output_payload,
+                }
+                if "messages" in kwargs:
+                    llm_data["messages_hash"] = sha256_value(kwargs.get("messages") or [])
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "openai", "provider": "openai", "operation": operation},
-                    data={
-                        "llm": {
-                            "provider": "openai",
-                            "operation": operation,
-                            "model": kwargs.get("model"),
-                            "input": input_payload,
-                            "output": output_payload,
-                        }
-                    },
+                    data={"llm": llm_data},
                     status="success",
                     latency_ms=latency_ms,
                 )

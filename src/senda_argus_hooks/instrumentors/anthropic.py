@@ -46,10 +46,11 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                messages_hash = sha256_value(kwargs.get("messages") or [])
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
-                    data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload, "output": output_payload}},
+                    data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "messages_hash": messages_hash, "input": input_payload, "output": output_payload}},
                     status="success",
                     latency_ms=latency_ms,
                 )
