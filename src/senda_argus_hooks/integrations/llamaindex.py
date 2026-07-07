@@ -153,6 +153,9 @@ def instrument_rag(
     provider: str | None = None,
     embedding_model: str | None = None,
     query_engine_name: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    source_type: str | None = None,
 ) -> RAGInstrumentation:
     """Enable RAG observability with one function call.
 
@@ -180,6 +183,9 @@ def instrument_rag(
                 vector_store=vector_store,
                 top_k=top_k,
                 target=target,
+                source=source,
+                source_url=source_url,
+                source_type=source_type,
                 operation="retrieve",
                 **kwargs,
             ),
@@ -199,6 +205,9 @@ def instrument_rag(
                 vector_store=vector_store,
                 top_k=top_k,
                 target=target,
+                source=source,
+                source_url=source_url,
+                source_type=source_type,
                 operation="aretrieve",
                 **kwargs,
             ),
@@ -311,6 +320,9 @@ def _call_retriever_method_with_argus(
     vector_store: str | None = None,
     top_k: int | None = None,
     target: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    source_type: str | None = None,
     operation: str = "retrieve",
     **kwargs: Any,
 ) -> Any:
@@ -322,6 +334,9 @@ def _call_retriever_method_with_argus(
         vector_store=vector_store,
         top_k=top_k,
         target=target,
+        source=source,
+        source_url=source_url,
+        source_type=source_type,
     )
     requested = _retrieval_payload(framework, query, meta)
     start = time.perf_counter()
@@ -484,6 +499,9 @@ def retrieve_with_argus(
     vector_store: str | None = None,
     top_k: int | None = None,
     target: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    source_type: str | None = None,
     method: str = "retrieve",
     **kwargs: Any,
 ) -> Any:
@@ -501,6 +519,9 @@ def retrieve_with_argus(
         vector_store=vector_store,
         top_k=top_k,
         target=target,
+        source=source,
+        source_url=source_url,
+        source_type=source_type,
     )
     requested = _retrieval_payload(framework, query, meta)
     start = time.perf_counter()
@@ -548,6 +569,9 @@ async def aretrieve_with_argus(
     vector_store: str | None = None,
     top_k: int | None = None,
     target: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    source_type: str | None = None,
     method: str = "aretrieve",
     **kwargs: Any,
 ) -> Any:
@@ -559,6 +583,9 @@ async def aretrieve_with_argus(
         vector_store=vector_store,
         top_k=top_k,
         target=target,
+        source=source,
+        source_url=source_url,
+        source_type=source_type,
     )
     requested = _retrieval_payload(framework, query, meta)
     start = time.perf_counter()
@@ -746,6 +773,9 @@ def _retrieval_payload(framework: str, query: Any, meta: dict[str, Any]) -> dict
         "collection_name": meta.get("collection_name"),
         "vector_store": meta.get("vector_store"),
         "target": meta.get("target"),
+        "source": meta.get("source"),
+        "source_url": meta.get("source_url"),
+        "source_type": meta.get("source_type"),
         "purpose_id": purpose_id,
     }
     if _capture_query():
