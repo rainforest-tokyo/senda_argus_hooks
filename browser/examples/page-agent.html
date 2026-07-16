@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>PageAgent + Senda Argus</title></head>
+<body>
+  <button id="approve">承認</button>
+  <input name="query" placeholder="検索">
+
+  <script src="../dist/senda-argus-browser-hooks.js"
+          data-project="page-agent-demo"
+          data-environment="dev"
+          data-exporter="console"></script>
+  <script type="module">
+    // PageAgentの生成後にrun単位の観測を追加できます。
+    // const agent = new PageAgent({...});
+    // SendaArgus.observePageAgent(agent);
+  </script>
+</body>
+</html>
