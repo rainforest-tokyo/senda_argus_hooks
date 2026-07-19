@@ -121,8 +121,10 @@ class OllamaClient:
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Ollamaへの接続に失敗しました: {url}. `ollama serve` が起動しているか確認してください。") from exc
         response = json.loads(raw)
-        content: Optional[str] = response.get("message", {}).get("content")
-        if not content:
+        msg = response.get("message") or {}
+        content: Optional[str] = msg.get("content")
+        tool_calls = msg.get("tool_calls") or []
+        if not content and not tool_calls:
             raise RuntimeError(f"Ollamaから想定外のレスポンスが返りました: {raw[:500]}")
         response.setdefault("provider", self.provider)
         response.setdefault("model", selected_model)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable
 
@@ -51,10 +52,21 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             try:
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
-                output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
                 if isinstance(response, dict):
                     model = response.get("model") or model
                     purpose = response.get("purpose") or purpose
+                    report, actual_tools = _extract_senda_argus_report(response)
+                    if report is not None:
+                        steering_detected = bool(actual_tools) and report.get("tool_name") not in {
+                            (tc.get("function") or {}).get("name") for tc in actual_tools if isinstance(tc, dict)
+                        }
+                        emit_event(
+                            "llm.tool_selection.proposed",
+                            source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
+                            data={"senda_argus_report": report, "steering_detected": steering_detected},
+                            status="success",
+                        )
+                output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
@@ -172,6 +184,36 @@ def _purpose_from_args(args) -> str | None:
     if args and isinstance(args[0], dict):
         return args[0].get("purpose")
     return None
+
+
+def _extract_senda_argus_report(response: dict) -> tuple[dict | None, list]:
+    """tool_calls から senda_argus_report を取り出し、残りの実ツール呼び出しを返す。
+
+    senda_argus_report エントリは response["message"]["tool_calls"] から除去される。
+    """
+    msg = response.get("message")
+    if not isinstance(msg, dict):
+        return None, []
+    tool_calls = msg.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return None, []
+    report_args: dict | None = None
+    actual_tools: list = []
+    for tc in tool_calls:
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict) and fn.get("name") == "senda_argus_report":
+            raw_args = fn.get("arguments") or {}
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except Exception:
+                    raw_args = {}
+            report_args = raw_args
+        else:
+            actual_tools.append(tc)
+    if report_args is not None:
+        msg["tool_calls"] = actual_tools
+    return report_args, actual_tools
 
 
 def _safe_response(response: Any) -> Any:
