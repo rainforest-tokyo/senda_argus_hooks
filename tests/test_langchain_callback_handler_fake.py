@@ -34,6 +34,31 @@ def test_langchain_callback_handler_emits_llm_tool_and_agent_events(tmp_path: Pa
     ]
     tool_events = [event for event in _events(path) if event["event_type"].startswith("tool_call")]
     assert tool_events[0]["data"]["tool"]["purpose_id"].startswith("purpose_")
+    # on_tool_start と on_tool_end が同一 run_id の tool_type を共有するため、
+    # requested と completed の purpose_id が一致する (以前は completed 側が
+    # tool_type を "unknown" に固定していたため一致しなかった)。
+    assert tool_events[0]["data"]["tool"]["purpose_id"] == tool_events[1]["data"]["tool"]["purpose_id"]
+
+    decision_event = next(event for event in _events(path) if event["event_type"] == "agent.decision")
+    assert "selected_tool_purpose_id" in decision_event["data"]
+
+
+def test_agent_decision_purpose_id_matches_tool_call_when_no_explicit_type(tmp_path: Path):
+    """AgentAction には tool_type が無いため、on_agent_action は _tool_type() の既定値
+    "function" に揃える。tool_type を明示しない tool 呼び出しと purpose_id が一致することを固定する。"""
+    path = tmp_path / "events.jsonl"
+    register(project="test", exporters=[{"type": "jsonl", "path": str(path)}])
+    handler = SendaArgusCallbackHandler()
+
+    handler.on_agent_action({"tool": "search_web"})
+    handler.on_tool_start({"name": "search_web"}, {"query": "senda-argus"}, run_id="tool-2")
+    handler.on_tool_end({"ok": True}, run_id="tool-2", name="search_web")
+    shutdown()
+
+    events = _events(path)
+    decision_event = next(e for e in events if e["event_type"] == "agent.decision")
+    requested_event = next(e for e in events if e["event_type"] == "tool_call.requested")
+    assert decision_event["data"]["selected_tool_purpose_id"] == requested_event["data"]["tool"]["purpose_id"]
 
 
 def test_langchain_callback_handler_emits_error_events(tmp_path: Path):

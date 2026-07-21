@@ -30,6 +30,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
         self._messages_hashes: dict[str, str] = {}
+        self._tool_types: dict[str, str] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -87,6 +88,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._starts[run_id] = time.perf_counter()
         tool_name = _tool_name(serialized, kwargs)
         tool_type = _tool_type(serialized, kwargs)
+        self._tool_types[run_id] = tool_type
         purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         tool = {
             "framework": self.framework,
@@ -106,13 +108,15 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        tool_type = self._tool_types.pop(run_id, "function")
         tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
-        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         tool = {
             "framework": self.framework,
             "tool_name": tool_name,
-            "tool_type": "unknown",
+            "tool_type": tool_type,
             "purpose_id": purpose_id,
             "result_hash": sha256_value(output),
         }
@@ -128,13 +132,15 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        tool_type = self._tool_types.pop(run_id, "function")
         tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
-        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         emit_event(
             "tool_call.failed",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_error"},
-            data={"tool": {"framework": self.framework, "tool_name": tool_name, "tool_type": "unknown", "purpose_id": purpose_id}},
+            data={"tool": {"framework": self.framework, "tool_name": tool_name, "tool_type": tool_type, "purpose_id": purpose_id}},
             status="error",
             latency_ms=latency_ms,
             error={"type": error.__class__.__name__, "message": str(error)},
@@ -173,10 +179,21 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_agent_action(self, action: Any, **kwargs: Any) -> None:
+        tool_name = getattr(action, "tool", None)
+        if tool_name is None and isinstance(action, dict):
+            tool_name = action.get("tool")
+        # on_tool_start/on_tool_end/on_tool_error と同じ derive_tool_purpose_id を使い、
+        # 同一 tool_name であれば宣言時と実行時で purpose_id が一致するようにする。
+        # IntentExecutionMismatchRule 相当の突合を LangChain 経路でも成立させるための値。
+        # tool_type は AgentAction から取得できないため _tool_type() の既定値 "function" に揃える。
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="function") if tool_name else None
+        data = {"agent": {"action": _safe_value(action), "kwargs": _safe_kwargs(kwargs)}}
+        if purpose_id:
+            data["selected_tool_purpose_id"] = purpose_id
         emit_event(
             "agent.decision",
             source={"component": "integration", "sdk": self.framework, "operation": "on_agent_action"},
-            data={"agent": {"action": _safe_value(action), "kwargs": _safe_kwargs(kwargs)}},
+            data=data,
             status="success",
         )
 
