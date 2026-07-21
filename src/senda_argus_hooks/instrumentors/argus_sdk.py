@@ -49,6 +49,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             provider = "ollama" if operation.startswith("ollama") else "mock"
             model = kwargs.get("model") or getattr(obj, "model", provider)
             purpose = kwargs.get("purpose") or _purpose_from_args(args) or ("refiner" if "refine" in operation else "answer")
+            messages_hash = sha256_value(args[0]) if args else None
             try:
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
@@ -67,10 +68,16 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                             status="success",
                         )
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
+                if messages_hash:
+                    llm_data["messages_hash"] = messages_hash
+                usage = _extract_usage(response)
+                if usage:
+                    llm_data["usage"] = usage
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
-                    data={"llm": {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}},
+                    data={"llm": llm_data},
                     status="success",
                     latency_ms=latency_ms,
                 )
@@ -224,3 +231,26 @@ def _safe_response(response: Any) -> Any:
             except Exception:
                 pass
     return response
+
+
+def _extract_usage(response: Any) -> dict[str, int] | None:
+    """MockLLMClient/OllamaClient レスポンスからトークン使用量を抽出する。
+
+    Ollama の /api/chat は prompt_eval_count/eval_count をトップレベルで返す。
+    OpenAI 互換 usage 形状 (prompt_tokens/completion_tokens) も併せて許容する。
+    """
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage")
+    input_tokens = (usage or {}).get("prompt_tokens") if isinstance(usage, dict) else None
+    output_tokens = (usage or {}).get("completion_tokens") if isinstance(usage, dict) else None
+    if input_tokens is None:
+        input_tokens = response.get("prompt_eval_count")
+    if output_tokens is None:
+        output_tokens = response.get("eval_count")
+    result: dict[str, int] = {}
+    if input_tokens is not None:
+        result["input_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        result["output_tokens"] = int(output_tokens)
+    return result or None

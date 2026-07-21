@@ -60,10 +60,13 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         run_id = _run_key(kwargs)
         latency_ms = _latency_ms(self._starts.pop(run_id, None))
         messages_hash = self._messages_hashes.pop(run_id, None)
+        usage = _extract_llm_usage(response)
         payload = _safe_value(response)
         llm_data = _payload_or_hash("output", payload, self._capture_response())
         if messages_hash:
             llm_data["messages_hash"] = messages_hash
+        if usage:
+            llm_data["usage"] = usage
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
@@ -214,6 +217,25 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
 def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:
     return {key: _safe_value(value)} if capture else {f"{key}_hash": sha256_value(value)}
+
+
+def _extract_llm_usage(response: Any) -> dict[str, int] | None:
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(response, dict) and llm_output is None:
+        llm_output = response.get("llm_output")
+    if not isinstance(llm_output, dict):
+        return None
+    usage = llm_output.get("token_usage") or llm_output.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+    output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+    result: dict[str, int] = {}
+    if input_tokens is not None:
+        result["input_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        result["output_tokens"] = int(output_tokens)
+    return result or None
 
 
 def _run_key(kwargs: dict[str, Any]) -> str:

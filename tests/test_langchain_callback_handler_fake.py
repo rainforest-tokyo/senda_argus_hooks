@@ -43,6 +43,22 @@ def test_langchain_callback_handler_emits_llm_tool_and_agent_events(tmp_path: Pa
     assert "selected_tool_purpose_id" in decision_event["data"]
 
 
+def test_on_llm_end_extracts_token_usage(tmp_path: Path):
+    path = tmp_path / "events.jsonl"
+    register(project="test", exporters=[{"type": "jsonl", "path": str(path)}], capture_arguments=True, capture_result=True)
+    handler = SendaArgusCallbackHandler()
+
+    handler.on_llm_start({"name": "fake_llm"}, ["hello"], run_id="llm-usage-1")
+    handler.on_llm_end(
+        {"generations": ["hi"], "llm_output": {"token_usage": {"prompt_tokens": 11, "completion_tokens": 22}}},
+        run_id="llm-usage-1",
+    )
+    shutdown()
+
+    llm_event = next(event for event in _events(path) if event["event_type"] == "llm.request")
+    assert llm_event["data"]["llm"]["usage"] == {"input_tokens": 11, "output_tokens": 22}
+
+
 def test_agent_decision_purpose_id_matches_tool_call_when_no_explicit_type(tmp_path: Path):
     """AgentAction には tool_type が無いため、on_agent_action は _tool_type() の既定値
     "function" に揃える。tool_type を明示しない tool 呼び出しと purpose_id が一致することを固定する。"""
