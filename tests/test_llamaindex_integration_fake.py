@@ -61,7 +61,10 @@ class FakeQueryEngine:
     name = "security_query_engine"
 
     def query(self, query):
-        return {"answer": "CVE-2024-3094 is related to xz-utils."}
+        return {
+            "answer": "CVE-2024-3094 is related to xz-utils.",
+            "source_nodes": [FakeNodeWithScore("chunk-1", "doc-1", 0.91)],
+        }
 
 
 class FailedQueryEngine:
@@ -157,6 +160,8 @@ def test_llamaindex_query_with_argus_emits_rag_query_events(tmp_path: Path):
     events = _events(path)
     assert [event["event_type"] for event in events] == ["rag.query.started", "rag.query.completed"]
     assert events[-1]["data"]["rag"]["query_engine"] == "security_query_engine"
+    assert events[-1]["data"]["rag"]["context_count"] == 1
+    assert events[-1]["data"]["rag"]["context_hash"]
 
 
 def test_llamaindex_callback_handler_emits_events(tmp_path: Path):

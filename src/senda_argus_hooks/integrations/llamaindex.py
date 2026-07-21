@@ -372,10 +372,73 @@ def _call_retriever_method_with_argus(
     return result
 
 
-async def _acall_retriever_method_with_argus(func: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
-    result = _call_retriever_method_with_argus(func, query, *args, **kwargs)
-    if hasattr(result, "__await__"):
-        return await result
+async def _acall_retriever_method_with_argus(
+    func: Any,
+    query: Any,
+    *args: Any,
+    framework: str,
+    retriever_name: str | None = None,
+    retriever_type: str | None = None,
+    index_name: str | None = None,
+    collection_name: str | None = None,
+    vector_store: str | None = None,
+    top_k: int | None = None,
+    target: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    source_type: str | None = None,
+    operation: str = "aretrieve",
+    **kwargs: Any,
+) -> Any:
+    """func が待機不要のコルーチンを返す非同期メソッドである前提で await してから完了イベントを送出する。
+
+    同期版に処理を委譲すると func(...) の戻り値がコルーチンのまま result_hash/
+    context_hash に使われ、実行前の未完了状態を completed として誤報告するため、
+    ここでは同期版のロジックを await 込みで再実装する。
+    """
+    meta = _metadata(
+        retriever_name=retriever_name,
+        retriever_type=retriever_type,
+        index_name=index_name,
+        collection_name=collection_name,
+        vector_store=vector_store,
+        top_k=top_k,
+        target=target,
+        source=source,
+        source_url=source_url,
+        source_type=source_type,
+    )
+    requested = _retrieval_payload(framework, query, meta)
+    start = time.perf_counter()
+    emit_event(
+        "retrieval.requested",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"retrieval": requested},
+        status="start",
+        purpose_id=requested["purpose_id"],
+    )
+    try:
+        result = await func(query, *args, **kwargs)
+    except Exception as exc:
+        emit_event(
+            "retrieval.failed",
+            source={"component": "integration", "sdk": framework, "operation": operation},
+            data={"retrieval": requested},
+            status="error",
+            latency_ms=_latency_ms(start),
+            error={"type": exc.__class__.__name__, "message": str(exc)},
+            purpose_id=requested["purpose_id"],
+        )
+        raise
+    completed = _retrieval_result_payload(framework, result, meta | {"query": query})
+    emit_event(
+        "retrieval.completed",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"retrieval": completed},
+        status="success",
+        latency_ms=_latency_ms(start),
+        purpose_id=completed["purpose_id"],
+    )
     return result
 
 
@@ -425,11 +488,51 @@ def _call_embedding_method_with_argus(
     return vector
 
 
-async def _acall_embedding_method_with_argus(func: Any, input_text: Any, *args: Any, **kwargs: Any) -> Any:
-    result = _call_embedding_method_with_argus(func, input_text, *args, **kwargs)
-    if hasattr(result, "__await__"):
-        return await result
-    return result
+async def _acall_embedding_method_with_argus(
+    func: Any,
+    input_text: Any,
+    *args: Any,
+    framework: str,
+    provider: str | None = None,
+    model: str | None = None,
+    input_count: int | None = None,
+    operation: str = "aembedding",
+    **kwargs: Any,
+) -> Any:
+    """同期版と同じ理由で、func を await してから completed イベントを送出する。"""
+    meta = {"provider": provider, "model": model, "input_count": input_count}
+    requested = _embedding_payload(framework, input_text, meta)
+    start = time.perf_counter()
+    emit_event(
+        "embedding.requested",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"embedding": requested},
+        status="start",
+        purpose_id=requested["purpose_id"],
+    )
+    try:
+        vector = await func(input_text, *args, **kwargs)
+    except Exception as exc:
+        emit_event(
+            "embedding.failed",
+            source={"component": "integration", "sdk": framework, "operation": operation},
+            data={"embedding": requested},
+            status="error",
+            latency_ms=_latency_ms(start),
+            error={"type": exc.__class__.__name__, "message": str(exc)},
+            purpose_id=requested["purpose_id"],
+        )
+        raise
+    completed = _embedding_result_payload(framework, vector, meta | {"input_text": input_text})
+    emit_event(
+        "embedding.completed",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"embedding": completed},
+        status="success",
+        latency_ms=_latency_ms(start),
+        purpose_id=completed["purpose_id"],
+    )
+    return vector
 
 
 def _call_query_engine_method_with_argus(
@@ -468,6 +571,11 @@ def _call_query_engine_method_with_argus(
         )
         raise
     completed = {**data, "result_hash": sha256_value(result)}
+    context_hash, context_count = _context_hash_and_count(result)
+    if context_hash is not None:
+        completed["context_hash"] = context_hash
+    if context_count is not None:
+        completed["context_count"] = context_count
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -480,10 +588,57 @@ def _call_query_engine_method_with_argus(
     return result
 
 
-async def _acall_query_engine_method_with_argus(func: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
-    result = _call_query_engine_method_with_argus(func, query, *args, **kwargs)
-    if hasattr(result, "__await__"):
-        return await result
+async def _acall_query_engine_method_with_argus(
+    func: Any,
+    query: Any,
+    *args: Any,
+    framework: str,
+    query_engine_name: str | None = None,
+    operation: str = "aquery",
+    **kwargs: Any,
+) -> Any:
+    """同期版と同じ理由で、func を await してから completed イベントを送出する。"""
+    start = time.perf_counter()
+    data = {
+        "framework": framework,
+        "query_engine": query_engine_name or "unknown",
+        "query_hash": sha256_value(query),
+    }
+    if _capture_query():
+        data["query"] = _safe_value(query)
+    emit_event(
+        "rag.query.started",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"rag": data},
+        status="start",
+    )
+    try:
+        result = await func(query, *args, **kwargs)
+    except Exception as exc:
+        emit_event(
+            "rag.query.failed",
+            source={"component": "integration", "sdk": framework, "operation": operation},
+            data={"rag": data},
+            status="error",
+            latency_ms=_latency_ms(start),
+            error={"type": exc.__class__.__name__, "message": str(exc)},
+        )
+        raise
+    completed = {**data, "result_hash": sha256_value(result)}
+    context_hash, context_count = _context_hash_and_count(result)
+    if context_hash is not None:
+        completed["context_hash"] = context_hash
+    if context_count is not None:
+        completed["context_count"] = context_count
+    if get_config().capture_result:
+        completed["result"] = _safe_value(result)
+    emit_event(
+        "rag.query.completed",
+        source={"component": "integration", "sdk": framework, "operation": operation},
+        data={"rag": completed},
+        status="success",
+        latency_ms=_latency_ms(start),
+    )
     return result
 
 
@@ -745,6 +900,11 @@ def query_with_argus(
         )
         raise
     completed = {**data, "result_hash": sha256_value(result)}
+    context_hash, context_count = _context_hash_and_count(result)
+    if context_hash is not None:
+        completed["context_hash"] = context_hash
+    if context_count is not None:
+        completed["context_count"] = context_count
     if get_config().capture_result:
         completed["result"] = _safe_value(result)
     emit_event(
@@ -919,6 +1079,43 @@ def _node(item: Any) -> Any:
     if isinstance(item, dict):
         return item.get("node") or item
     return getattr(item, "node", item)
+
+
+def _node_text(item: Any) -> str | None:
+    node = _node(item)
+    get_content = getattr(node, "get_content", None)
+    if callable(get_content):
+        try:
+            text = get_content()
+            if text is not None:
+                return str(text)
+        except Exception:
+            pass
+    text = getattr(node, "text", None)
+    if text is not None:
+        return str(text)
+    if isinstance(node, dict):
+        text = node.get("text")
+        if text is not None:
+            return str(text)
+    return None
+
+
+def _context_hash_and_count(result: Any) -> tuple[str | None, int | None]:
+    """クエリエンジンの応答から実際に使用された検索コンテキストの hash と件数を抽出する。
+
+    LlamaIndex のクエリエンジン応答は source_nodes (検索されコンテキストとして
+    LLM に渡されたノード集合) を持つ。この情報がなければ context drift/count
+    異常検知ルールは一切発火できないため、result を黒箱のまま扱わず抽出する。
+    """
+    source_nodes = getattr(result, "source_nodes", None)
+    if source_nodes is None and isinstance(result, dict):
+        source_nodes = result.get("source_nodes")
+    if source_nodes is None:
+        return None, None
+    items = _as_list(source_nodes)
+    texts = [_node_text(item) for item in items]
+    return sha256_value(texts), len(items)
 
 
 def _document_id(item: Any) -> str | None:
