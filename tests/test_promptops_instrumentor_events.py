@@ -30,8 +30,14 @@ def test_promptops_and_builtin_mcp_instrumentor_events(tmp_path):
     promptops = PromptOpsClient()
     mcp = MockMCPClient({"lookup": lambda query: {"ok": True, "query": query}}, server="mock_mcp")
 
-    decision = promptops.agent_decision(task_id="task-1", selected_tool="lookup", reason="need context")
+    decision = promptops.agent_decision(
+        task_id="task-1",
+        selected_tool="lookup",
+        selected_tool_purpose_id="purpose_lookup_mock_mcp",
+        reason="need context",
+    )
     assert decision["selected_tool"] == "lookup"
+    assert decision["selected_tool_purpose_id"] == "purpose_lookup_mock_mcp"
     assert mcp.call_tool("lookup", {"query": "CVE-2024-3094"}, capability="vulnerability_intelligence")["ok"] is True
     completed = promptops.run_completed(run_id="run-1", status="success")
     assert completed["status"] == "success"
@@ -47,6 +53,7 @@ def test_promptops_and_builtin_mcp_instrumentor_events(tmp_path):
         "promptops.run.completed",
     ]
     assert events[0]["source"]["sdk"] == "senda_argus_hooks.sdk"
+    assert events[0]["data"]["selected_tool_purpose_id"] == "purpose_lookup_mock_mcp"
     assert events[1]["data"]["mcp"]["tool"] == "lookup"
     assert events[1]["purpose_id"].startswith("purpose_")
     assert events[2]["data"]["mcp"]["result_hash"]

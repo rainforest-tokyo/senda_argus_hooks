@@ -29,10 +29,13 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self.framework = framework
         self.capture_payloads = capture_payloads
         self._starts: dict[str, float] = {}
+        self._messages_hashes: dict[str, str] = {}
+        self._tool_types: dict[str, str] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
+        self._messages_hashes[run_id] = sha256_value(prompts)
         payload = {"serialized": serialized, "prompts": prompts, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -44,6 +47,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
         self._starts[run_id] = time.perf_counter()
+        self._messages_hashes[run_id] = sha256_value(messages)
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -53,12 +57,20 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        messages_hash = self._messages_hashes.pop(run_id, None)
+        usage = _extract_llm_usage(response)
         payload = _safe_value(response)
+        llm_data = _payload_or_hash("output", payload, self._capture_response())
+        if messages_hash:
+            llm_data["messages_hash"] = messages_hash
+        if usage:
+            llm_data["usage"] = usage
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
-            data={"llm": _payload_or_hash("output", payload, self._capture_response())},
+            data={"llm": llm_data},
             status="success",
             latency_ms=latency_ms,
         )
@@ -79,6 +91,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._starts[run_id] = time.perf_counter()
         tool_name = _tool_name(serialized, kwargs)
         tool_type = _tool_type(serialized, kwargs)
+        self._tool_types[run_id] = tool_type
         purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         tool = {
             "framework": self.framework,
@@ -98,13 +111,15 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        tool_type = self._tool_types.pop(run_id, "function")
         tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
-        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         tool = {
             "framework": self.framework,
             "tool_name": tool_name,
-            "tool_type": "unknown",
+            "tool_type": tool_type,
             "purpose_id": purpose_id,
             "result_hash": sha256_value(output),
         }
@@ -120,13 +135,15 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        latency_ms = _latency_ms(self._starts.pop(_run_key(kwargs), None))
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        tool_type = self._tool_types.pop(run_id, "function")
         tool_name = str(kwargs.get("name") or kwargs.get("tool") or "unknown")
-        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="unknown")
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type=tool_type)
         emit_event(
             "tool_call.failed",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_error"},
-            data={"tool": {"framework": self.framework, "tool_name": tool_name, "tool_type": "unknown", "purpose_id": purpose_id}},
+            data={"tool": {"framework": self.framework, "tool_name": tool_name, "tool_type": tool_type, "purpose_id": purpose_id}},
             status="error",
             latency_ms=latency_ms,
             error={"type": error.__class__.__name__, "message": str(error)},
@@ -165,10 +182,21 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         )
 
     def on_agent_action(self, action: Any, **kwargs: Any) -> None:
+        tool_name = getattr(action, "tool", None)
+        if tool_name is None and isinstance(action, dict):
+            tool_name = action.get("tool")
+        # on_tool_start/on_tool_end/on_tool_error と同じ derive_tool_purpose_id を使い、
+        # 同一 tool_name であれば宣言時と実行時で purpose_id が一致するようにする。
+        # IntentExecutionMismatchRule 相当の突合を LangChain 経路でも成立させるための値。
+        # tool_type は AgentAction から取得できないため _tool_type() の既定値 "function" に揃える。
+        purpose_id = derive_tool_purpose_id(framework=self.framework, tool_name=tool_name, tool_type="function") if tool_name else None
+        data = {"agent": {"action": _safe_value(action), "kwargs": _safe_kwargs(kwargs)}}
+        if purpose_id:
+            data["selected_tool_purpose_id"] = purpose_id
         emit_event(
             "agent.decision",
             source={"component": "integration", "sdk": self.framework, "operation": "on_agent_action"},
-            data={"agent": {"action": _safe_value(action), "kwargs": _safe_kwargs(kwargs)}},
+            data=data,
             status="success",
         )
 
@@ -189,6 +217,25 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
 def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:
     return {key: _safe_value(value)} if capture else {f"{key}_hash": sha256_value(value)}
+
+
+def _extract_llm_usage(response: Any) -> dict[str, int] | None:
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(response, dict) and llm_output is None:
+        llm_output = response.get("llm_output")
+    if not isinstance(llm_output, dict):
+        return None
+    usage = llm_output.get("token_usage") or llm_output.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+    output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+    result: dict[str, int] = {}
+    if input_tokens is not None:
+        result["input_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        result["output_tokens"] = int(output_tokens)
+    return result or None
 
 
 def _run_key(kwargs: dict[str, Any]) -> str:

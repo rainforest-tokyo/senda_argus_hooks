@@ -11,11 +11,20 @@ def event(event_type: str, data: dict[str, Any] | None = None, source: dict[str,
     return emit_event(event_type, data=data or {}, source=source or {"component": "custom"}, status=status)
 
 
-def agent_decision(*, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, reason: str | None = None, alternatives: list[str] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def agent_decision(*, task_id: str | None = None, agent_id: str | None = None, selected_tool: str | None = None, selected_tool_purpose_id: str | None = None, reason: str | None = None, alternatives: list[str | dict[str, Any]] | None = None, risk_level: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """agent.decision を送信する。
+
+    selected_tool_purpose_id は mcp_tool_call() / _wrap_mcp が derive_purpose_id() で
+    計算するのと同じ purpose_id を渡すと、IntentExecutionMismatchRule が
+    mcp.tool_call.requested の data.mcp.purpose_id と突合できる。呼び出し元が
+    選択した tool の server/capability を把握している場合に
+    core.identity.derive_purpose_id() で計算して渡す。
+    """
     data = {
         "task_id": task_id,
         "agent_id": agent_id,
         "selected_tool": selected_tool,
+        "selected_tool_purpose_id": selected_tool_purpose_id,
         "reason": reason,
         "alternatives": alternatives or [],
         "risk_level": risk_level,
