@@ -46,10 +46,15 @@ class AnthropicInstrumentor(BaseInstrumentor):
                 response = original(obj, *args, **kwargs)
                 latency_ms = int((time.perf_counter() - start) * 1000)
                 output_payload = _safe_response(response) if cfg.capture_response else {"response_hash": sha256_value(_safe_response(response))}
+                messages_hash = sha256_value(kwargs.get("messages") or [])
+                llm_data: dict[str, Any] = {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "messages_hash": messages_hash, "input": input_payload, "output": output_payload}
+                usage = _extract_usage(response)
+                if usage:
+                    llm_data["usage"] = usage
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "anthropic", "provider": "anthropic", "operation": operation},
-                    data={"llm": {"provider": "anthropic", "operation": operation, "model": kwargs.get("model"), "input": input_payload, "output": output_payload}},
+                    data={"llm": llm_data},
                     status="success",
                     latency_ms=latency_ms,
                 )
@@ -133,3 +138,23 @@ def _safe_response(response: Any) -> Any:
             except Exception:
                 pass
     return str(response)
+
+
+def _extract_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None and isinstance(response, dict):
+        usage = response.get("usage")
+    if usage is None:
+        return None
+
+    def _get(name: str) -> Any:
+        return getattr(usage, name, None) if not isinstance(usage, dict) else usage.get(name)
+
+    input_tokens = _get("input_tokens")
+    output_tokens = _get("output_tokens")
+    result: dict[str, int] = {}
+    if input_tokens is not None:
+        result["input_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        result["output_tokens"] = int(output_tokens)
+    return result or None
