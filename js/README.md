@@ -47,6 +47,8 @@ register({
   captureResponse: false,
   captureArguments: true,
   captureResult: false,
+  scanResult: true, // detection-only scan text of tool results; Argus does not store it
+  scanArguments: false, // off by default; when true, a redacted scan text of tool call arguments is sent for detection only (the text still carries argument strings)
   redact: true
 }, {
   openai,
@@ -68,6 +70,8 @@ Node.js ESM exports cannot be safely replaced globally after import in the same 
 A preload/loader based ESM auto-instrumentation layer can be added in a later JS release without changing the normalized event schema.
 
 Exporter configuration objects compatible with the Python package are supported for `jsonl`, `stdout`, and `null`, while custom exporter instances remain supported.
+
+Observation never changes the result of an instrumented call. An exporter that throws or returns a rejected Promise is isolated from the call and from the other exporters, including during `flush()` and `shutdown()`. Circular data is recorded as `[Circular]` and nesting deeper than 100 levels as `[MaxDepth]`. If an event still cannot be built, its `data` is emptied and `security.observation_failed` is set to `true`. Calls that return `undefined` are recorded as completed.
 
 ## Framework integrations (JS v0.2.0 / Senda-Argus Hooks v0.7.0)
 

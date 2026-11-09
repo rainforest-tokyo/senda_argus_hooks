@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ast
 import contextlib
+import functools
+import json
+import logging
 import time
 from typing import Any
 
@@ -10,8 +14,12 @@ from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
+from senda_argus_hooks.core.precheck import ToolCallBlocked, check_tool_call, precheck_enabled
+from senda_argus_hooks.core.result_scan import arguments_scan_fields, result_scan_fields
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.integrations.llamaindex import _retrieval_payload, _retrieval_result_payload
 
 try:  # Optional dependency. Unit tests use this module without LangChain installed.
     from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
@@ -22,6 +30,9 @@ except Exception:  # noqa: BLE001  # pragma: no cover - 任意の依存の impor
 # 呼び出しごとに積む控えの上限。鍵は呼び出し側が決める値で、終了も失敗も呼ばれずに打ち切られる
 # 経路がある。上限が無いと、その打ち切りが続くだけで控えが際限なく伸びる。
 MAX_PENDING_RUNS: int = 1024
+
+
+logger = logging.getLogger("senda_argus_hooks.langchain")
 
 
 def _remember(store: dict, key: str, value: Any) -> None:
@@ -36,6 +47,26 @@ def _remember(store: dict, key: str, value: Any) -> None:
             store.pop(stale, None)
 
 
+def _structured_input(input_str: Any, kwargs: dict[str, Any]) -> Any:
+    """ツールの入力を構造のまま返す。文字列にした dict は改行が 2 文字になり、2 行目の命令を読めない。"""
+    inputs = kwargs.get("inputs")
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(input_str, str) and input_str[:1] in "{[":
+        for parse in (json.loads, ast.literal_eval):
+            with contextlib.suppress(ValueError, SyntaxError, RecursionError, MemoryError, TypeError):
+                return parse(input_str)
+    return input_str
+
+
+def _retriever_meta(serialized: Any, query: Any) -> dict[str, Any]:
+    """retriever の名前と問い合わせを、検索の事象の項目の形へ写す。"""
+    name = None
+    if isinstance(serialized, dict):
+        name = serialized.get("name") or (serialized.get("id") or [None])[-1]
+    return {"query": query, "retriever_name": name, "retriever_type": name}
+
+
 class SendaArgusCallbackHandler(_BaseCallbackHandler):
     """LangChain callback handler that emits normalized Senda-Argus events.
 
@@ -43,6 +74,11 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
     dependency. Add it to LangChain callback configuration when you want to
     capture framework-level events without application-level audit calls.
     """
+
+    @property
+    def raise_error(self) -> bool:
+        """実行前の判定が有効なときだけ例外を伝える。登録の前に作ったハンドラーでも、呼び出しの時の設定に従う。"""
+        return precheck_enabled()
 
     def __init__(self, *, framework: str = "langchain", capture_payloads: bool | None = None):
         with contextlib.suppress(TypeError):
@@ -55,8 +91,10 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         # 利用者入力が 1 つの文字列に混ざるため、利用者の入力を指示として扱ってしまう。
         self._prompt_line_hashes: dict[str, list[str]] = {}
         self._prompt_pair_hashes: dict[str, list[str]] = {}
+        self._prompt_semantic_hashes: dict[str, list[str]] = {}
         self._tool_types: dict[str, str] = {}
         self._requested_models: dict[str, str] = {}
+        self._retriever_meta: dict[str, dict[str, Any]] = {}
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -87,6 +125,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         pair_hashes = system_prompt_pair_digests(*_sources)
         if pair_hashes:
             _remember(self._prompt_pair_hashes, run_id, pair_hashes)
+        semantic_hashes = system_prompt_semantic_digests(*_sources)
+        if semantic_hashes:
+            _remember(self._prompt_semantic_hashes, run_id, semantic_hashes)
         payload = {"serialized": serialized, "messages": messages, "kwargs": _safe_kwargs(kwargs)}
         emit_event(
             "llm.request.started",
@@ -120,6 +161,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         pair_hashes = self._prompt_pair_hashes.pop(run_id, None)
         if pair_hashes:
             llm_data["system_prompt_pair_hashes"] = pair_hashes
+        semantic_hashes = self._prompt_semantic_hashes.pop(run_id, None)
+        if semantic_hashes:
+            llm_data["system_prompt_semantic_hashes"] = semantic_hashes
         emit_event(
             "llm.request",
             source={"component": "integration", "sdk": self.framework, "operation": "on_llm_end"},
@@ -136,6 +180,7 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         self._messages_hashes.pop(run_id, None)
         self._prompt_line_hashes.pop(run_id, None)
         self._prompt_pair_hashes.pop(run_id, None)
+        self._prompt_semantic_hashes.pop(run_id, None)
         self._requested_models.pop(run_id, None)
         emit_event(
             "llm.error",
@@ -162,6 +207,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_arguments:
             tool["arguments"] = input_str
+        structured = _structured_input(input_str, kwargs)
+        if get_config().scan_arguments:
+            tool.update(arguments_scan_fields(structured))
         emit_event(
             "tool_call.requested",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_start"},
@@ -169,6 +217,14 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             status="start",
             purpose_id=purpose_id,
         )
+        # 記録の後に問い合わせる。止めた呼び出しも、試みとして記録に残す。
+        try:
+            check_tool_call(tool_name, structured)
+        except ToolCallBlocked:
+            # 止めた呼び出しには終了の通知が来ない。控えを残すと、拒否のたびに増える。
+            self._starts.pop(run_id, None)
+            self._tool_types.pop(run_id, None)
+            raise
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         run_id = _run_key(kwargs)
@@ -185,6 +241,9 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
         }
         if get_config().capture_result:
             tool["result"] = _safe_value(output)
+        if get_config().scan_result:
+            # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
+            tool.update(result_scan_fields(_safe_value(output)))
         emit_event(
             "tool_call.completed",
             source={"component": "integration", "sdk": self.framework, "operation": "on_tool_end"},
@@ -192,6 +251,49 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
             status="success",
             latency_ms=latency_ms,
             purpose_id=purpose_id,
+        )
+
+    def on_retriever_start(self, serialized: dict[str, Any], query: str, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        _remember(self._starts, run_id, time.perf_counter())
+        meta = _retriever_meta(serialized, query)
+        _remember(self._retriever_meta, run_id, meta)
+        payload = _retrieval_payload(self.framework, query, meta)
+        emit_event(
+            "retrieval.requested",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_start"},
+            data={"retrieval": payload},
+            status="start",
+            purpose_id=payload["purpose_id"],
+        )
+
+    def on_retriever_end(self, documents: Any, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        meta = self._retriever_meta.pop(run_id, {})
+        payload = _retrieval_result_payload(self.framework, documents, meta)
+        emit_event(
+            "retrieval.completed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_end"},
+            data={"retrieval": payload},
+            status="success",
+            latency_ms=latency_ms,
+            purpose_id=payload["purpose_id"],
+        )
+
+    def on_retriever_error(self, error: BaseException, **kwargs: Any) -> None:
+        run_id = _run_key(kwargs)
+        latency_ms = _latency_ms(self._starts.pop(run_id, None))
+        meta = self._retriever_meta.pop(run_id, {})
+        payload = _retrieval_payload(self.framework, meta.get("query"), meta)
+        emit_event(
+            "retrieval.failed",
+            source={"component": "integration", "sdk": self.framework, "operation": "on_retriever_error"},
+            data={"retrieval": payload},
+            status="error",
+            latency_ms=latency_ms,
+            error={"type": error.__class__.__name__, "message": str(error)},
+            purpose_id=payload["purpose_id"],
         )
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
@@ -273,6 +375,24 @@ class SendaArgusCallbackHandler(_BaseCallbackHandler):
 
     def _capture_response(self) -> bool:
         return get_config().capture_response if self.capture_payloads is None else self.capture_payloads
+
+
+def _contained(method: Any) -> Any:
+    """観測の例外を止める。raise_error はハンドラーの全コールバックに効くため、実行の判定以外は伝えない。"""
+
+    @functools.wraps(method)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - 観測の失敗で利用者の処理を止めない
+            logger.warning("langchain_callback_failed", exc_info=True)
+            return None
+
+    return wrapper
+
+
+for _callback in [n for n in vars(SendaArgusCallbackHandler) if n.startswith("on_") and n != "on_tool_start"]:
+    setattr(SendaArgusCallbackHandler, _callback, _contained(getattr(SendaArgusCallbackHandler, _callback)))
 
 
 def _payload_or_hash(key: str, value: Any, capture: bool) -> dict[str, Any]:

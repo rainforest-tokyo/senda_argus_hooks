@@ -10,7 +10,16 @@ from typing import Any
 
 from senda_argus_hooks.exporters.parquet import flatten_event
 
-REQUIRED_KEYS = {"schema_version", "event_id", "trace_id", "span_id", "timestamp", "project", "environment", "event_type"}
+REQUIRED_KEYS = {
+    "schema_version",
+    "event_id",
+    "trace_id",
+    "span_id",
+    "timestamp",
+    "project",
+    "environment",
+    "event_type",
+}
 
 
 def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -58,10 +67,23 @@ def cmd_inspect(args) -> int:
         for event in events:
             event_type = str(event.get("event_type"))
             summary[event_type] = summary.get(event_type, 0) + 1
-        print(json.dumps({"count": len(events), "event_types": summary}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"count": len(events), "event_types": summary},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     for event in events[: args.limit]:
-        print(json.dumps(event, ensure_ascii=False, indent=2 if args.pretty else None, default=str))
+        print(
+            json.dumps(
+                event,
+                ensure_ascii=False,
+                indent=2 if args.pretty else None,
+                default=str,
+            )
+        )
     return 0
 
 
@@ -72,7 +94,13 @@ def cmd_validate(args) -> int:
         if missing:
             errors.append({"index": idx, "missing": sorted(missing)})
     if errors:
-        print(json.dumps({"valid": False, "errors": errors[:50], "error_count": len(errors)}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"valid": False, "errors": errors[:50], "error_count": len(errors)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 1
     print(json.dumps({"valid": True}, ensure_ascii=False, indent=2))
     return 0
@@ -95,7 +123,9 @@ def cmd_convert(args) -> int:
             out.mkdir(parents=True, exist_ok=True)
             out_file = out / "events-000001.parquet"
         rows = [flatten_event(event) for event in events]
-        pq.write_table(pa.Table.from_pylist(rows), out_file, compression=args.compression)
+        pq.write_table(
+            pa.Table.from_pylist(rows), out_file, compression=args.compression
+        )
         print(str(out_file))
         return 0
     if args.to == "jsonl":
@@ -112,8 +142,6 @@ def cmd_convert(args) -> int:
     raise ValueError(f"Unsupported target: {args.to}")
 
 
-
-
 def _event_sort_key(event: dict[str, Any]) -> str:
     return str(event.get("timestamp") or "")
 
@@ -125,7 +153,17 @@ def cmd_trace(args) -> int:
         trace_ids = [e.get("trace_id") for e in events if e.get("trace_id")]
         trace_id = trace_ids[0] if trace_ids else None
     selected = [e for e in events if e.get("trace_id") == trace_id] if trace_id else []
-    print(json.dumps({"trace_id": trace_id, "count": len(selected), "events": [_brief_event(e) for e in selected]}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "count": len(selected),
+                "events": [_brief_event(e) for e in selected],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -138,7 +176,16 @@ def cmd_tools(args) -> int:
         if not tool:
             continue
         key = f"{mcp.get('server') or 'unknown'}::{tool}"
-        entry = tools.setdefault(key, {"server": mcp.get("server"), "tool": tool, "count": 0, "purpose_ids": set(), "mcp_profile_ids": set()})
+        entry = tools.setdefault(
+            key,
+            {
+                "server": mcp.get("server"),
+                "tool": tool,
+                "count": 0,
+                "purpose_ids": set(),
+                "mcp_profile_ids": set(),
+            },
+        )
         entry["count"] += 1
         if mcp.get("purpose_id"):
             entry["purpose_ids"].add(mcp.get("purpose_id"))
@@ -146,10 +193,15 @@ def cmd_tools(args) -> int:
             entry["mcp_profile_ids"].add(mcp.get("mcp_profile_id"))
     rows = []
     for entry in tools.values():
-        rows.append({**entry, "purpose_ids": sorted(entry["purpose_ids"]), "mcp_profile_ids": sorted(entry["mcp_profile_ids"])})
+        rows.append(
+            {
+                **entry,
+                "purpose_ids": sorted(entry["purpose_ids"]),
+                "mcp_profile_ids": sorted(entry["mcp_profile_ids"]),
+            }
+        )
     print(json.dumps({"tools": rows}, ensure_ascii=False, indent=2))
     return 0
-
 
 
 def cmd_retrievals(args) -> int:
@@ -165,7 +217,11 @@ def cmd_retrievals(args) -> int:
                 [
                     str(retrieval.get("framework") or "unknown"),
                     str(retrieval.get("retriever_name") or "unknown"),
-                    str(retrieval.get("index_name") or retrieval.get("collection_name") or "unknown"),
+                    str(
+                        retrieval.get("index_name")
+                        or retrieval.get("collection_name")
+                        or "unknown"
+                    ),
                 ]
             )
             entry = retrievals.setdefault(
@@ -190,7 +246,9 @@ def cmd_retrievals(args) -> int:
             if event.get("event_type") == "retrieval.completed":
                 entry["completed"] += 1
                 if retrieval.get("result_count") is not None:
-                    entry["result_count_total"] += int(retrieval.get("result_count") or 0)
+                    entry["result_count_total"] += int(
+                        retrieval.get("result_count") or 0
+                    )
             if event.get("event_type") == "retrieval.failed":
                 entry["failed"] += 1
             if event.get("latency_ms") is not None:
@@ -199,8 +257,25 @@ def cmd_retrievals(args) -> int:
             if retrieval.get("purpose_id"):
                 entry["purpose_ids"].add(retrieval.get("purpose_id"))
         if embedding:
-            key = "::".join([str(embedding.get("framework") or "unknown"), str(embedding.get("provider") or "unknown"), str(embedding.get("model") or "unknown")])
-            entry = embeddings.setdefault(key, {"framework": embedding.get("framework"), "provider": embedding.get("provider"), "model": embedding.get("model"), "count": 0, "completed": 0, "failed": 0, "purpose_ids": set()})
+            key = "::".join(
+                [
+                    str(embedding.get("framework") or "unknown"),
+                    str(embedding.get("provider") or "unknown"),
+                    str(embedding.get("model") or "unknown"),
+                ]
+            )
+            entry = embeddings.setdefault(
+                key,
+                {
+                    "framework": embedding.get("framework"),
+                    "provider": embedding.get("provider"),
+                    "model": embedding.get("model"),
+                    "count": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "purpose_ids": set(),
+                },
+            )
             entry["count"] += 1
             if event.get("event_type") == "embedding.completed":
                 entry["completed"] += 1
@@ -214,14 +289,32 @@ def cmd_retrievals(args) -> int:
         latency_count = int(entry["latency_ms_count"] or 0)
         retrieval_rows.append(
             {
-                **{k: v for k, v in entry.items() if not k.endswith("_total") and k not in {"latency_ms_count", "purpose_ids"}},
-                "avg_result_count": (entry["result_count_total"] / completed) if completed else None,
-                "avg_latency_ms": (entry["latency_ms_total"] / latency_count) if latency_count else None,
+                **{
+                    k: v
+                    for k, v in entry.items()
+                    if not k.endswith("_total")
+                    and k not in {"latency_ms_count", "purpose_ids"}
+                },
+                "avg_result_count": (entry["result_count_total"] / completed)
+                if completed
+                else None,
+                "avg_latency_ms": (entry["latency_ms_total"] / latency_count)
+                if latency_count
+                else None,
                 "purpose_ids": sorted(entry["purpose_ids"]),
             }
         )
-    embedding_rows = [{**entry, "purpose_ids": sorted(entry["purpose_ids"])} for entry in embeddings.values()]
-    print(json.dumps({"retrievals": retrieval_rows, "embeddings": embedding_rows}, ensure_ascii=False, indent=2))
+    embedding_rows = [
+        {**entry, "purpose_ids": sorted(entry["purpose_ids"])}
+        for entry in embeddings.values()
+    ]
+    print(
+        json.dumps(
+            {"retrievals": retrieval_rows, "embeddings": embedding_rows},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -231,12 +324,29 @@ def cmd_stats(args) -> int:
     by_agent: dict[str, int] = {}
     by_purpose: dict[str, int] = {}
     for event in events:
-        by_type[str(event.get("event_type"))] = by_type.get(str(event.get("event_type")), 0) + 1
+        by_type[str(event.get("event_type"))] = (
+            by_type.get(str(event.get("event_type")), 0) + 1
+        )
         if event.get("agent_id"):
-            by_agent[str(event.get("agent_id"))] = by_agent.get(str(event.get("agent_id")), 0) + 1
+            by_agent[str(event.get("agent_id"))] = (
+                by_agent.get(str(event.get("agent_id")), 0) + 1
+            )
         if event.get("purpose_id"):
-            by_purpose[str(event.get("purpose_id"))] = by_purpose.get(str(event.get("purpose_id")), 0) + 1
-    print(json.dumps({"count": len(events), "event_types": by_type, "agents": by_agent, "purposes": by_purpose}, ensure_ascii=False, indent=2))
+            by_purpose[str(event.get("purpose_id"))] = (
+                by_purpose.get(str(event.get("purpose_id")), 0) + 1
+            )
+    print(
+        json.dumps(
+            {
+                "count": len(events),
+                "event_types": by_type,
+                "agents": by_agent,
+                "purposes": by_purpose,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -264,7 +374,6 @@ def _brief_event(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-
 def cmd_autohook_install(args) -> int:
     from senda_argus_hooks.autoinstall import install, print_json
 
@@ -286,11 +395,99 @@ def cmd_autohook_uninstall(args) -> int:
     print_json(uninstall(target=args.target, force=args.force))
     return 0
 
+
+def cmd_devin_collect(args) -> int:
+    """Devin の API からセッションと監査記録を引き取り、Argus へ送る。"""
+    import os
+    import time
+
+    from senda_argus_hooks.collectors.devin import collector_from_env
+    from senda_argus_hooks.exporters.argus import ArgusExporter
+
+    endpoint = os.environ.get("SENDA_ARGUS_ENDPOINT", "").strip()
+    if not endpoint:
+        raise ValueError("SENDA_ARGUS_ENDPOINT is required")
+    exporter = ArgusExporter(
+        {
+            "endpoint": endpoint,
+            "api_key": os.environ.get("SENDA_ARGUS_API_KEY", ""),
+            "timeout": int(os.environ.get("SENDA_ARGUS_TIMEOUT", "10") or 10),
+        }
+    )
+    collector = collector_from_env(exporter.send_sync)
+    # 0 や負の間隔は待たずに回り続けるため、下限を置く。
+    interval = max(10, int(args.interval))
+    from senda_argus_hooks.collectors.devin import DevinApiError
+
+    while True:
+        try:
+            result = collector.poll_once()
+        except DevinApiError as exc:
+            # 取得位置は進んでいない。次の周期で同じ範囲を引き直す。
+            print(f"error: {exc}", file=sys.stderr, flush=True)
+            result = {"sent": 0, "failed": 1}
+        print(json.dumps(result), flush=True)
+        if args.once:
+            return 0 if not result.get("failed") else 1
+        time.sleep(interval)
+
+
+def cmd_hook(args) -> int:
+    """コーディングエージェントの hook の入口。製品の応答を標準出力へ書く。"""
+    from senda_argus_hooks.integrations.coding_agent_hooks import main as hook_main
+
+    return hook_main(args.product, args.phase, args.config)
+
+
+def cmd_hooks_install(args) -> int:
+    """コーディングエージェントの hook の設定を書き込む。"""
+    from senda_argus_hooks.cli.agent_hooks_install import (
+        InstallError,
+        run_install,
+        supported_products,
+    )
+
+    if args.product == "all":
+        products, skipped = supported_products(args.scope)
+        for name, reason in skipped.items():
+            print(f"飛ばした製品 {name}: {reason}", file=sys.stderr)
+        if not products:
+            raise InstallError(f"方式 {args.scope} で導入できる製品が無い")
+    else:
+        products = [args.product]
+    results = run_install(products, args.scope, dry_run=args.dry_run)
+    print(json.dumps([r.__dict__ for r in results], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_scan_mcp(args) -> int:
+    """端末の MCP サーバを起動せずに走査し、結果を表示するか Argus へ送る。"""
+    from senda_argus_hooks.cli.scan_mcp import run
+
+    return run(args)
+
+
+def cmd_scan_endpoint(args) -> int:
+    """端末のエージェントと MCP の設定を走査し、結果を表示するか Argus へ送る。"""
+    from senda_argus_hooks.cli.scan_endpoint import run
+
+    return run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="senda-hooks", description="Inspect, validate, and convert Senda-Argus hook event files.")
+    from senda_argus_hooks.integrations.coding_agent_hooks import (
+        PRODUCTS as HOOK_PRODUCTS,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="senda-hooks",
+        description="Inspect, validate, and convert Senda-Argus hook event files.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    inspect_p = sub.add_parser("inspect", help="Print events or summary from JSONL/Parquet")
+    inspect_p = sub.add_parser(
+        "inspect", help="Print events or summary from JSONL/Parquet"
+    )
     inspect_p.add_argument("path")
     inspect_p.add_argument("--limit", type=int, default=10)
     inspect_p.add_argument("--pretty", action="store_true")
@@ -308,7 +505,6 @@ def build_parser() -> argparse.ArgumentParser:
     convert_p.add_argument("--compression", default="zstd")
     convert_p.set_defaults(func=cmd_convert)
 
-
     trace_p = sub.add_parser("trace", help="Show events in one trace")
     trace_p.add_argument("path")
     trace_p.add_argument("--trace-id")
@@ -318,8 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
     tools_p.add_argument("path")
     tools_p.set_defaults(func=cmd_tools)
 
-
-    retrievals_p = sub.add_parser("retrievals", help="Summarize RAG retrieval and embedding usage")
+    retrievals_p = sub.add_parser(
+        "retrievals", help="Summarize RAG retrieval and embedding usage"
+    )
     retrievals_p.add_argument("path")
     retrievals_p.set_defaults(func=cmd_retrievals)
 
@@ -327,23 +524,112 @@ def build_parser() -> argparse.ArgumentParser:
     stats_p.add_argument("path")
     stats_p.set_defaults(func=cmd_stats)
 
-    autohook_p = sub.add_parser("autohook", help="Install or manage zero-code Python startup hooks")
+    autohook_p = sub.add_parser(
+        "autohook", help="Install or manage zero-code Python startup hooks"
+    )
     autohook_sub = autohook_p.add_subparsers(dest="autohook_command", required=True)
 
-    autohook_install_p = autohook_sub.add_parser("install", help="Enable auto-hook for this Python environment")
-    autohook_install_p.add_argument("--scope", choices=["auto", "user", "system"], default="auto")
+    autohook_install_p = autohook_sub.add_parser(
+        "install", help="Enable auto-hook for this Python environment"
+    )
+    autohook_install_p.add_argument(
+        "--scope", choices=["auto", "user", "system"], default="auto"
+    )
     autohook_install_p.add_argument("--target", help="Explicit site-packages directory")
     autohook_install_p.add_argument("--force", action="store_true")
     autohook_install_p.set_defaults(func=cmd_autohook_install)
 
-    autohook_status_p = autohook_sub.add_parser("status", help="Show auto-hook installation status")
+    autohook_status_p = autohook_sub.add_parser(
+        "status", help="Show auto-hook installation status"
+    )
     autohook_status_p.add_argument("--target", help="Explicit site-packages directory")
     autohook_status_p.set_defaults(func=cmd_autohook_status)
 
-    autohook_uninstall_p = autohook_sub.add_parser("uninstall", help="Disable auto-hook for this Python environment")
-    autohook_uninstall_p.add_argument("--target", help="Explicit site-packages directory")
+    autohook_uninstall_p = autohook_sub.add_parser(
+        "uninstall", help="Disable auto-hook for this Python environment"
+    )
+    autohook_uninstall_p.add_argument(
+        "--target", help="Explicit site-packages directory"
+    )
     autohook_uninstall_p.add_argument("--force", action="store_true")
     autohook_uninstall_p.set_defaults(func=cmd_autohook_uninstall)
+
+    devin_p = sub.add_parser(
+        "devin-collect",
+        help="Pull Devin sessions and audit logs through the Devin API and send them to Argus",
+    )
+    devin_p.add_argument("--once", action="store_true", help="Pull once and exit")
+    devin_p.add_argument(
+        "--interval", type=int, default=60, help="Seconds between pulls"
+    )
+    devin_p.set_defaults(func=cmd_devin_collect)
+
+    hook_p = sub.add_parser(
+        "hook", help="Run as a coding agent hook and return the Argus decision"
+    )
+    hook_p.add_argument("product", choices=list(HOOK_PRODUCTS))
+    hook_p.add_argument("phase", choices=["pre", "post", "prompt"])
+    hook_p.add_argument(
+        "--config", help="Managed config file; when set, only this file is read"
+    )
+    hook_p.set_defaults(func=cmd_hook)
+
+    hooks_install_p = sub.add_parser(
+        "hooks-install", help="Write coding agent hook settings"
+    )
+    hooks_install_p.add_argument(
+        "--product",
+        choices=[*HOOK_PRODUCTS, "all"],
+        required=True,
+    )
+    hooks_install_p.add_argument(
+        "--scope", choices=["managed", "user"], default="managed"
+    )
+    hooks_install_p.add_argument("--dry-run", action="store_true")
+    hooks_install_p.set_defaults(func=cmd_hooks_install)
+
+    scan_p = sub.add_parser(
+        "scan-mcp",
+        help="Scan configured MCP servers statically without starting them and report to Argus",
+    )
+    scan_p.add_argument(
+        "--tools-json",
+        action="append",
+        metavar="NAME=PATH",
+        help="Pre-fetched tools/list JSON for a server; NAME is the server name or product:name",
+    )
+    scan_p.add_argument("--send", action="store_true", help="Send results to Argus")
+    scan_p.add_argument(
+        "--dry-run", action="store_true", help="Print the bodies and send nothing"
+    )
+    scan_p.add_argument(
+        "--timeout", type=float, default=120.0, help="Seconds allowed per scanner run"
+    )
+    scan_p.add_argument("--home", help=argparse.SUPPRESS)
+    scan_p.add_argument("--system-root", help=argparse.SUPPRESS)
+    scan_p.add_argument(
+        "--platform", choices=["linux", "darwin"], help=argparse.SUPPRESS
+    )
+    scan_p.set_defaults(func=cmd_scan_mcp)
+
+    endpoint_p = sub.add_parser(
+        "scan-endpoint",
+        help="Report agents and MCP configs on this device to Argus without reading secrets",
+    )
+    endpoint_p.add_argument("--send", action="store_true", help="Send the report to Argus")
+    endpoint_p.add_argument(
+        "--dry-run", action="store_true", help="Print the report and send nothing"
+    )
+    endpoint_p.add_argument("--home", help=argparse.SUPPRESS)
+    endpoint_p.add_argument("--system-root", help=argparse.SUPPRESS)
+    endpoint_p.add_argument(
+        "--platform", choices=["linux", "darwin"], help=argparse.SUPPRESS
+    )
+    endpoint_p.set_defaults(func=cmd_scan_endpoint)
+
+    from senda_argus_hooks.cli.device import add_parser as add_device_parser
+
+    add_device_parser(sub)
 
     return parser
 

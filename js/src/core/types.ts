@@ -34,6 +34,8 @@ export interface EventRecord {
   latency_ms: number | null;
   error: Record<string, unknown> | null;
   runtime: Record<string, unknown>;
+  // 実行環境の札。production と staging と test と evaluation に限る。設定に無い値は載せない。
+  run_environment?: string | null;
 }
 
 export interface Exporter {
@@ -51,11 +53,20 @@ export type ExporterConfig =
 export interface RegisterOptions {
   project?: string;
   environment?: string;
+  runEnvironment?: string;
   exporters?: Array<Exporter | ExporterConfig>;
   capturePrompt?: boolean;
   captureResponse?: boolean;
   captureArguments?: boolean;
   captureResult?: boolean;
+  // 戻り値の本文とは別に、検知の走査だけに使う文を送る。Argus は保存せず判定の後に捨てる。
+  scanResult?: boolean;
+  // 呼び出しの引数から、検知の走査だけに使う文を送る。本文の保存は captureArguments が決める。既定は送らない。
+  scanArguments?: boolean;
+  // ツールの実行の前に Argus の判定を問い合わせ、拒否と承認待ちの呼び出しを止める。既定は無効。
+  enforcePrecheck?: boolean;
+  // 判定に接続できないときに通すか。既定は通す。
+  precheckFailOpen?: boolean;
   captureHash?: boolean;
   redact?: boolean;
   actor?: Record<string, unknown>;
@@ -70,7 +81,8 @@ export interface RegisterOptions {
 }
 
 export interface RuntimeConfig extends Required<Omit<RegisterOptions,
-  "exporters" | "tenantId" | "sessionId" | "conversationId" | "runId" | "turnId" | "agentId" | "purposeId" | "agentHint">> {
+  "exporters" | "tenantId" | "sessionId" | "conversationId" | "runId" | "turnId" | "agentId" | "purposeId" | "agentHint" | "runEnvironment">> {
+  runEnvironment?: string;
   tenantId?: string;
   sessionId?: string;
   conversationId?: string;

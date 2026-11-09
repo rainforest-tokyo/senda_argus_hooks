@@ -1,0 +1,186 @@
+import { REDACT_FIELDS, redactValue } from "./redaction.js";
+
+// tool の戻り値から、検知の走査だけに使う文を作る。
+//
+// 戻り値の本文は captureResult を有効にしたときだけ送る。本文を送らない既定の導入では、戻り値に
+// 埋め込まれた指示が Argus の注入の規則に一度も届かない。ここで作る文は走査のためだけに送り、
+// Argus は保存せず、判定へ渡した後に捨てる。本文の保存とは別の設定で切り替える。
+//
+// 秘匿は平坦にする前に当てる。鍵名で資格情報と分かる項目は、平坦にすると鍵名との対応が失われる。
+// 長さには上限を置き、超えた文は先頭と末尾を残して中央を落とす。先頭だけを残すと、長い前置きの
+// 後ろへ指示を置くだけで走査から外せる。値は Python の計装と揃える。
+
+export const RESULT_SCAN_MAX_CHARS = 32768;
+export const RESULT_SCAN_ELISION = "\n...\n";
+const MAX_DEPTH = 32;
+
+// 文字列の中に書かれた鍵と値の組。構造を解析できない値でも、鍵名で資格情報と分かる値を伏せる。
+// Python とブラウザの計装と同じ規則にする。
+function kvPattern(keys: Iterable<string>): RegExp {
+  const alt = [...keys].sort((a, b) => b.length - a.length).map((k) => k.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|");
+  return new RegExp(`(^|[^A-Za-z0-9_-])(\\\\?["']?)(${alt})(\\\\?["']?)(\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s,;&}\\]]+)`, "gi");
+}
+const SCAN_KV_PATTERN = kvPattern(REDACT_FIELDS);
+
+function redactScanString(value: string): string {
+  return value.replace(SCAN_KV_PATTERN, (_m, pre, q1, key, q2, sep) => `${pre}${q1}${key}${q2}${sep}"***REDACTED***"`);
+}
+
+function collect(value: unknown, out: string[], depth: number, cut: { hit: boolean }): void {
+  if (value !== null && typeof value === "object" && depth >= MAX_DEPTH) { cut.hit = true; return; }
+  if (typeof value === "string" && (value === "[MaxDepth]" || value === "[Circular]")) { cut.hit = true; return; }
+  if (typeof value === "string") {
+    out.push(redactScanString(value));
+  } else if (Array.isArray(value)) {
+    for (const item of value) collect(item, out, depth + 1, cut);
+  } else if (value && typeof value === "object") {
+    // Argus の走査も辞書の鍵を読む。鍵を落とすと、構造化した戻り値の鍵へ置いた指示が届かない。
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      out.push(key);
+      collect(item, out, depth + 1, cut);
+    }
+  }
+}
+
+export interface ResultScanFields {
+  result_scan?: string;
+  result_scan_truncated?: boolean;
+  result_scan_length?: number;
+  result_scan_failed?: boolean;
+}
+
+// 事象へ載せる走査の文と印。切り詰めたら印と元の長さを載せる。作成に失敗しても例外を出さず、
+// 落としたことを示す印だけを返す。事象は送る。
+export function resultScanFields(value: unknown, joiner = " "): ResultScanFields {
+  try {
+    const parts: string[] = [];
+    const cut = { hit: false };
+    collect(redactValue(value), parts, 0, cut);
+    const kept = parts.filter((part) => part.trim() !== "");
+    if (kept.length === 0) return cut.hit ? { result_scan_truncated: true } : {};
+    // 引数は値ごとに改行で分ける。命令の規則は行頭を見るため、前の項目の後ろに続くと外れる。
+    let text = kept.join(joiner);
+    const out: ResultScanFields = {};
+    if (text.length > RESULT_SCAN_MAX_CHARS) {
+      out.result_scan_truncated = true;
+      out.result_scan_length = text.length;
+      const keep = Math.floor((RESULT_SCAN_MAX_CHARS - RESULT_SCAN_ELISION.length) / 2);
+      text = text.slice(0, keep) + RESULT_SCAN_ELISION + text.slice(text.length - keep);
+    } else if (cut.hit) {
+      out.result_scan_truncated = true;
+    }
+    out.result_scan = text;
+    return out;
+  } catch {
+    return { result_scan_failed: true };
+  }
+}
+
+export interface ArgumentsScanFields {
+  arguments_scan?: string;
+  arguments_scan_truncated?: boolean;
+  arguments_scan_length?: number;
+  arguments_scan_failed?: boolean;
+  arguments_scan_named?: Record<string, string>;
+}
+
+// 呼び出しの引数から、検知の走査だけに使う文と印を作る。秘匿と上限は戻り値の走査の文と同じ実装を通す。
+// 導出を 2 つ持たない。引数の側だけ別に書くと、秘匿か上限の片方だけが変わったときに、秘密が通るか、
+// 長い前置きの後ろの命令が落ちる。
+export function argumentsScanFields(value: unknown): ArgumentsScanFields {
+  const fields = resultScanFields(value, "\n");
+  const out: ArgumentsScanFields = {};
+  if (fields.result_scan !== undefined) out.arguments_scan = fields.result_scan;
+  if (fields.result_scan_truncated) out.arguments_scan_truncated = true;
+  if (fields.result_scan_length !== undefined) out.arguments_scan_length = fields.result_scan_length;
+  if (fields.result_scan_failed) out.arguments_scan_failed = true;
+  const named = namedArguments(value);
+  if (Object.keys(named.values).length > 0) out.arguments_scan_named = named.values;
+  if (named.cut) out.arguments_scan_truncated = true;
+  return out;
+}
+
+const NAMED_ARGUMENT_KEYS = new Set([
+  "command",
+  "cmd",
+  "commandline",
+  "command_line",
+  "script",
+  "shell",
+  "exec",
+  "run",
+  "path",
+  "file",
+  "file_path",
+  "filepath",
+  "filename",
+  "target_file",
+  "absolute_path",
+]);
+const NAMED_ARGUMENT_MAX_CHARS = 4096;
+const NAMED_ELISION = " ... ";
+
+// 実行と宛先の項目の、秘匿した値。文へ畳むと本文と区別できないため、項目の名前を残して別に載せる。
+function namedArguments(value: unknown): { values: Record<string, string>; cut: boolean } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { values: {}, cut: false };
+  }
+  try {
+    const joined: Record<string, string> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const name = key.toLowerCase();
+      if (!NAMED_ARGUMENT_KEYS.has(name)) continue;
+      const parts: string[] = [];
+      collect(redactValue(child), parts, 0, { hit: false });
+      const text = parts.filter((p) => p.trim()).join("\n");
+      if (text) joined[name] = joined[name] ? `${joined[name]}\n${text}` : text;
+    }
+    let cut = false;
+    const values: Record<string, string> = {};
+    for (const [name, text] of Object.entries(joined)) {
+      if (text.length > NAMED_ARGUMENT_MAX_CHARS) {
+        const keep = Math.floor((NAMED_ARGUMENT_MAX_CHARS - NAMED_ELISION.length) / 2);
+        values[name] = text.slice(0, keep) + NAMED_ELISION + text.slice(-keep);
+        cut = true;
+      } else {
+        values[name] = text;
+      }
+    }
+    return { values, cut };
+  } catch {
+    return { values: {}, cut: false };
+  }
+}
+
+export function resultScanText(value: unknown): string | undefined {
+  return resultScanFields(value).result_scan;
+}
+
+// 受け取り側は結末の記録の走査の文だけを読むため、実行前の記録からは外す。
+export function withoutArgumentsScan(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(fields).filter(([key]) => !key.startsWith("arguments_scan")));
+}
+
+// 文書ごとの配分の下限。文書が多いときは、順位の高い文書から上限に収まる数だけを読む。
+const DOCUMENT_MIN_CHARS = 256;
+
+// 取得した文書の走査の文を作る。全体で切ると、中央の順位の文書が丸ごと落ちるため、文書ごとに配分する。
+// 秘匿は切り詰めの前に完全な文書へ適用する。先に切ると、鍵と値が切れ目をまたいだときに、値の残りがそのまま残る。
+export function retrievedDocumentsScanFields(texts: string[]): ResultScanFields {
+  try {
+    const redacted = texts.map((text) => redactScanString(String(redactValue(text))));
+    const selected = redacted.slice(0, Math.floor(RESULT_SCAN_MAX_CHARS / (DOCUMENT_MIN_CHARS + 1)));
+    if (selected.length === 0) return {};
+    const budget = Math.max(DOCUMENT_MIN_CHARS, Math.floor(RESULT_SCAN_MAX_CHARS / selected.length) - 1);
+    const keep = Math.floor((budget - RESULT_SCAN_ELISION.length) / 2);
+    const sliced = selected.map((text) => (text.length <= budget ? text : text.slice(0, keep) + RESULT_SCAN_ELISION + text.slice(text.length - keep)));
+    const fields = resultScanFields(sliced);
+    if (selected.length < redacted.length || selected.some((text) => text.length > budget)) {
+      fields.result_scan_truncated = true;
+      fields.result_scan_length = redacted.reduce((sum, text) => sum + text.length, 0) + redacted.length - 1;
+    }
+    return fields;
+  } catch {
+    return { result_scan_failed: true };
+  }
+}

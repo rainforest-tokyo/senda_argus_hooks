@@ -1,6 +1,6 @@
 # Senda-Argus Deployment Guide
 
-This guide covers the current deployment patterns for Senda-Argus Hooks and Senda Arugus Agent Studio.
+This guide covers the current deployment patterns for Senda-Argus Hooks and Senda Argus Agent Studio.
 
 ## Deployment modes
 
@@ -68,7 +68,7 @@ docker run --rm \
 
 When `SENDA_AGENT_INSTALL_DEPS=true`, `/workspace/requirements.txt` is installed when present.
 
-## Senda Arugus Agent Studio
+## Senda Argus Agent Studio
 
 Start from the Agent Studio directory:
 
@@ -283,10 +283,15 @@ SENDA_ARGUS_ENDPOINT=https://argus.example.local
 SENDA_ARGUS_API_KEY=...
 SENDA_ARGUS_PROJECT=my-agent
 SENDA_ARGUS_ENVIRONMENT=prod
+# production, staging, test, evaluation のいずれか。試験と評価の環境で外部へ出た呼び出しを Argus が検知する
+SENDA_ARGUS_RUN_ENVIRONMENT=production
 SENDA_ARGUS_CAPTURE_PROMPT=false
 SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false
 SENDA_ARGUS_CAPTURE_RESULT=false
+SENDA_ARGUS_SCAN_RESULT=true
+SENDA_ARGUS_SCAN_ARGUMENTS=true
+SENDA_ARGUS_SCAN_INPUT=true
 SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```

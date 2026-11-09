@@ -15,8 +15,10 @@ from senda_argus_hooks.instrumentors import (
     BedrockInstrumentor,
     LiteLLMInstrumentor,
     MCPPythonInstrumentor,
+    ModelLoadingInstrumentor,
     OllamaInstrumentor,
     OpenAIInstrumentor,
+    OpenAIRealtimeInstrumentor,
     VertexAIInstrumentor,
 )
 from senda_argus_hooks.integrations.openai_agents import OpenAIAgentsInstrumentor
@@ -40,11 +42,18 @@ def register(
     instrument_mcp: bool = True,
     instrument_argus_sdk: bool = True,
     instrument_openai_agents: bool = True,
+    instrument_openai_realtime: bool = True,
+    instrument_model_loading: bool = True,
     rag: dict[str, Any] | None = None,
     capture_prompt: bool = False,
     capture_response: bool = False,
     capture_arguments: bool = False,
     capture_result: bool = False,
+    scan_result: bool = True,
+    scan_arguments: bool = True,
+    scan_input: bool = True,
+    enforce_precheck: bool = False,
+    precheck_fail_open: bool = True,
     capture_hash: bool = True,
     redact: bool = True,
     actor: dict[str, Any] | None = None,
@@ -57,6 +66,7 @@ def register(
     purpose_id: str | None = None,
     agent_hint: str | None = None,
     batch_size: int = 1,
+    run_environment: str | None = None,
 ) -> dict[str, Any]:
     """Configure Senda-Argus Hooks.
 
@@ -72,6 +82,11 @@ def register(
         capture_response=capture_response,
         capture_arguments=capture_arguments,
         capture_result=capture_result,
+        scan_result=scan_result,
+        scan_arguments=scan_arguments,
+        enforce_precheck=enforce_precheck,
+        precheck_fail_open=precheck_fail_open,
+        scan_input=scan_input,
         capture_hash=capture_hash,
         redact=redact,
         actor=actor or {},
@@ -83,9 +98,11 @@ def register(
         agent_id=agent_id,
         purpose_id=purpose_id,
         agent_hint=agent_hint,
+        run_environment=run_environment,
     )
     bus = EventBus(exporters=exporter_instances, batch_size=batch_size)
     configure(cfg, bus)
+    _configure_unjudged_guard(exporter_instances)
 
     installed = {}
     if auto_instrument:
@@ -107,6 +124,10 @@ def register(
             installed["argus_sdk"] = _activate(ArgusSDKInstrumentor())
         if instrument_openai_agents:
             installed["openai_agents"] = _activate(OpenAIAgentsInstrumentor())
+        if instrument_openai_realtime:
+            installed["openai_realtime"] = _activate(OpenAIRealtimeInstrumentor())
+        if instrument_model_loading:
+            installed["model_loading"] = _activate(ModelLoadingInstrumentor())
 
     rag_handle = None
     if rag:
@@ -119,7 +140,27 @@ def register(
         except Exception:  # noqa: BLE001 - 計装を有効にできなくても呼び出し元を止めない
             installed["rag"] = False
 
+    # shutdown で止めた canary を、収集を再開したときに始め直す。鍵が設定されていなければ何もしない。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.onboarding import restart_canary_from_env
+
+        restart_canary_from_env()
     return {"project": project, "environment": environment, "instrumentors": installed, "rag": rag_handle}
+
+
+def _configure_unjudged_guard(exporters: list[Any]) -> None:
+    """Argus の送出器があれば、行動の前の確認をその宛先で有効にする。無ければ無効にする。"""
+    from senda_argus_hooks.core.precheck import configure_precheck
+    from senda_argus_hooks.core.unjudged import configure_guard
+    from senda_argus_hooks.exporters.argus import ArgusExporter
+
+    argus = next((e for e in exporters if isinstance(e, ArgusExporter)), None)
+    if argus is None:
+        configure_guard(None)
+        configure_precheck(None)
+        return
+    configure_guard(argus.endpoint, argus.api_key, timeout=argus.admission_timeout)
+    configure_precheck(argus.endpoint, argus.api_key)
 
 
 def _activate(instrumentor) -> bool:
@@ -137,6 +178,22 @@ def flush() -> None:
 
 
 def shutdown() -> None:
+    # 収集を止めるなら canary も止める。止めないと、計装を外した後も生きている印だけが届き、
+    # 収集の停止が検知されない。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.onboarding import stop_canary
+
+        stop_canary()
+    # 行動の前の確認も外す。残すと、登録を解いた後も audit.mcp_tool_call が古い宛先へ照会し、
+    # 行動を止めうる。
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.unjudged import configure_guard
+
+        configure_guard(None)
+    with contextlib.suppress(Exception):
+        from senda_argus_hooks.core.precheck import reset_precheck
+
+        reset_precheck()
     flush()
     for rag_handle in list(_ACTIVE_RAG_INSTRUMENTATIONS):  # noqa: PERF101 - 後始末の間に一覧が書き換わっても回す対象を固定する
         with contextlib.suppress(Exception):

@@ -57,7 +57,9 @@ The verified event included `source.sdk = "ollama"`, `source.operation = "Client
 | LiteLLM                        | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | Ollama Python SDK              | Experimental       | SDK method hook / monkey patch | Fake SDK hook test             | `llm.request`, `llm.error`                                                   |
 | MCP Python SDK                 | Experimental       | Client/session hook            | Fake `ClientSession` hook test | `mcp.tool_call.requested`, `mcp.tool_call.completed`, `mcp.tool_call.failed` |
+| Local model loading | Experimental | Function hook / monkey patch | Real `joblib` and `safetensors` load tests | `model.loaded` |
 | OpenAI Agents SDK | Experimental | Runner hook / trace processor helper | Real SDK import/patch smoke test; invalid API key error-path test | `agent.run.*`, `agent.step.*`, `tool_call.*`, `llm.*` |
+| OpenAI Realtime voice session | Experimental | Connection send/receive hook for the OpenAI SDK and the Agents SDK realtime model | Recorded event replay; real SDK class patch check | `llm.request`, `tool_call.*`, `agent.decision`, `mcp.tool_call.completed` |
 | LangChain | Experimental | Callback handler | Real `CallbackManager` smoke test | `llm.*`, `tool_call.*`, `agent.step.*`, `agent.decision` |
 | LangGraph | Experimental | Stream wrapper / event stream integration | Real `StateGraph` stream smoke test | `agent.run.*`, `agent.step.*` |
 | LlamaIndex / RAG | Experimental | `register(..., rag={...})` / `instrument_rag()` / wrapper helpers | Fake component tests; `register(..., rag={...})` smoke test | `retrieval.*`, `embedding.*`, `rag.query.*` |
@@ -96,6 +98,20 @@ Real API success-path tests for OpenAI, Anthropic, and LiteLLM require valid pro
 
 When multiple SDK hooks are enabled at the same time, wrapper SDKs such as LiteLLM may also call lower-level provider SDKs. In that case, multiple events may be emitted for a single application-level request. Disable lower-level hooks if you only want wrapper-level events.
 
+
+## Local model loading hook
+
+When the process loads a model artifact from a local path, the hooks emit `model.loaded`. The wrapped functions are `torch.load`, `safetensors.torch.load_file`, `safetensors.numpy.load_file`, and `joblib.load`. None of these packages is a dependency of the base installation; a function is wrapped only when its package is importable.
+
+The event carries `data.model` with:
+
+* `loader`: the function used, for example `torch.load`
+* `artifact_path`: the absolute path that was loaded
+* `format`: detected from the first bytes of the file, not from the file name. `pickle`, `pytorch_zip`, and `joblib` can run code while loading. `safetensors` and `gguf` do not. Anything else is `unknown`
+* `artifact_hash`: SHA-256 of the whole file. Files larger than `SENDA_ARGUS_MODEL_DIGEST_MAX_BYTES` (default 64 GiB) get no digest and `digest_truncated: true`
+* `weights_only`: for `torch.load`, the value passed by the caller, or `null` when not passed
+
+Loads from a file object instead of a path carry only `loader`, `format: unknown`, and `source: file_object`. Set `SENDA_ARGUS_INSTRUMENT_MODEL_LOADING=0` to turn the hook off in the zero-code bootstrap, or pass `instrument_model_loading=False` to `register(...)`.
 
 ## Ollama Python SDK hook
 
@@ -488,6 +504,32 @@ This is intended to answer:
 
 > Which MCP server profile was used?
 
+### Device key and who sent it
+
+`agent_id` is declared by the caller, and an organization API key does not say which device sent a record. A device key lets Argus decide the device from a signature instead of from the body.
+
+Register a device once. An admin issues a one-time registration code in Argus, then:
+
+```bash
+senda-hooks device register --endpoint https://argus.example --code <registration code>
+```
+
+The command prints a URL and a short code. Open the URL, sign in with your organization SSO and approve the code. The person is bound to the device by that SSO approval. The OS user name is sent only as a self-declared value. An organization API key alone cannot register a device.
+
+After registration every record, discard report, MCP scan and hook decision request carries these headers, computed over the exact request body:
+
+| Header | Content |
+|---|---|
+| `X-Argus-Device-Id` | device identifier |
+| `X-Argus-Device-Ts` | send time in epoch seconds |
+| `X-Argus-Device-Seq` | per-device sequence number |
+| `X-Argus-Device-Sig` | hex HMAC-SHA256 of `argus-device-v1`, device id, ts, seq and the SHA-256 of the body, joined by newlines |
+| `X-Argus-Device-User`, `X-Argus-Device-Host` | self-declared OS user and host name, not signed |
+
+The key is stored in `~/.config/senda-argus/device.json` with owner-only permissions, or in the file named by `SENDA_ARGUS_DEVICE_FILE`. A key file readable by other users is ignored. CI, containers and serverless runtimes have no place for a file: set `SENDA_ARGUS_DEVICE_ID` and `SENDA_ARGUS_DEVICE_SECRET` to a short-lived workload key issued by an admin.
+
+Without a key nothing changes: records are sent unsigned and Argus stores them as unverified until the organization enforces device keys. `senda-hooks device status` shows the registration and `senda-hooks device renew` replaces the key before it expires.
+
 ## Installation
 
 ### Local development install
@@ -786,6 +828,35 @@ For callback-style usage, the package also provides:
 from senda_argus_hooks.integrations import SendaArgusLlamaIndexCallbackHandler
 ```
 
+### OpenAI Realtime voice sessions
+
+`register(auto_instrument=True)` wraps the realtime connection of the OpenAI SDK, both `openai.resources.realtime.realtime` and the older `openai.resources.beta.realtime.realtime`, and the realtime model of the OpenAI Agents SDK. Disable it with `instrument_openai_realtime=False` or `SENDA_ARGUS_INSTRUMENT_OPENAI_REALTIME=false`. The session is mapped onto existing events, so the current Argus rules apply without new event types:
+
+| Session event | Emitted event |
+| --- | --- |
+| `session.update` instructions and persona | `llm.request` with instruction digests |
+| `response.create` instructions, a per-response override | `llm.request` with instruction digests |
+| `conversation.item.create` or `response.create` input with a system message | `llm.request` with instruction digests |
+| `conversation.item.input_audio_transcription.completed` | `llm.request` with the transcript in the input field and a redacted `input_scan` |
+| `response.function_call_arguments.done` | `tool_call.requested` and `agent.decision` |
+| `conversation.item.create` with `function_call_output` | `tool_call.completed` |
+| provider-run `mcp_call` item | `mcp.tool_call.completed` |
+| Agents SDK handoff | `agent.decision` with `decision_kind: handoff` |
+
+Each confirmed utterance starts a turn, and the tool calls that follow share its `turn_id`. One session is one `run_id`. Raw audio from `input_audio_buffer.append` and `response.output_audio.delta` is never read into an event.
+
+When the session does not enable transcription, a local transcriber can be plugged in. It runs inside the process and does not connect out:
+
+```python
+from senda_argus_hooks.core.local_transcription import faster_whisper_transcriber
+from senda_argus_hooks.instrumentors.openai_realtime import set_local_transcriber
+
+# The directory must exist locally. A model name is refused, so nothing is downloaded.
+set_local_transcriber(faster_whisper_transcriber("/models/whisper-small-ct2", weights_sha256="sha256:..."))
+```
+
+`faster-whisper` is an optional dependency, installed with the `voice-local` extra.
+
 ## Exporters
 
 ### JSONL exporter
@@ -830,6 +901,57 @@ Parquet support requires the `parquet` extra.
 python -m pip install -e ".[parquet]"
 ```
 
+## Argus が判定できない時の扱い
+
+Argus の送出器を設定した処理では、エージェントの行動を実行する前に、Argus が新しい判定を行えるかを確認する。
+判定できない時は、理由の符号ごとに決めた扱いに従い、黙って許可しない。
+
+理由の符号:
+
+| 符号 | 意味 | 既定の扱い |
+| --- | --- | --- |
+| `actions_exhausted` | 判定に使う Actions が不足している | `block` |
+| `quota_unknown` | 残量の照会先へ届かず、残量が分からない | `hold` |
+| `read_only` | 組織が閲覧専用になっている | `block` |
+| `argus_unavailable` | Argus に届かない、または Argus が応答しない | `pass` |
+
+扱い:
+
+- `block`: 行動を実行せず、`senda_argus_hooks.core.unjudged.UnjudgedActionBlocked` を投げる。例外は `reason_code` と `action` を属性に持つ。
+- `hold`: 判定ができるようになるまで照会を繰り返して待つ。できるようになれば通常どおり実行し、上限に達したら `block` と同じく止める。
+- `pass`: 警告のログを出して実行する。実行の記録には `unjudged`、`unjudged_reason`、`unjudged_action` を載せる。
+
+いずれの扱いでも、判定を省いたときは種別 `argus.unjudged` の記録を送出のキューへ積む。本文は理由の符号、扱い、時刻、ツールの名前のダイジェストだけで、プロンプトや引数の本文は載せない。
+
+確認を入れている場所は、MCP の Python のクライアントの `ClientSession.call_tool`、SDK の `MockMCPClient.call_tool`、`audit.mcp_tool_call` で囲んだ処理である。
+
+設定:
+
+| 環境変数 | 内容 | 既定の値 |
+| --- | --- | --- |
+| `SENDA_ARGUS_UNJUDGED_POLICY` | `reason=action,reason=action` の形で符号ごとの扱いを書く。知らない符号と扱いの項目は警告して捨て、他の項目は活かす | 上の表の既定の扱い |
+| `SENDA_ARGUS_UNJUDGED_HOLD_SECONDS` | `hold` で待つ秒数の上限 | `30` |
+| `SENDA_ARGUS_UNJUDGED_GUARD` | `off` で確認を無効にする。無効にした時は起動時に 1 回警告する | 有効 |
+
+```bash
+export SENDA_ARGUS_UNJUDGED_POLICY="quota_unknown=block,argus_unavailable=hold"
+export SENDA_ARGUS_UNJUDGED_HOLD_SECONDS=60
+```
+
+方針の優先の順:
+
+1. Argus が `GET /v1/usage/admission` で返す `unjudged_policy`
+2. Argus に届かない時は、最後に受け取った `unjudged_policy`
+3. それも無ければ `SENDA_ARGUS_UNJUDGED_POLICY`
+
+照会の結果は応答の `ttl_seconds` の間だけ控える。控えの秒数は 1 以上 300 以下に丸める。照会の扱い:
+
+- 接続の失敗、タイムアウト、5xx は `argus_unavailable` とする。
+- 404 は照会を持たない古い Argus として許可し、1 回だけ情報のログを出す。
+- 401 と 403 は、拒否の符号が `organization_read_only`、`actions_exhausted`、`quota_unknown` ならその理由とし、組織の停止や鍵の誤りは `argus_unavailable` とする。組織の停止で行動を止めない既存の扱いと揃え、既定では警告と記録を残して実行する。止めるには `argus_unavailable=block` を設定する。
+
+送出の側では、取り込みが `actions_exhausted`、`quota_unknown`、`organization_read_only` を `retryable: false` で返した記録を送り直さず、警告のログに理由を出す。`hold` の 503 は既存の送り直しの経路に乗る。判定を省いて受け付けた 202 は、警告のログに理由を出す。
+
 ## Capture and redaction controls
 
 Senda-Argus Hooks can capture or suppress sensitive data.
@@ -853,7 +975,11 @@ Common controls:
 | `capture_response`  | Capture LLM response payloads when supported          |
 | `capture_arguments` | Capture MCP, generic tool, retrieval query, and embedding input payloads |
 | `capture_result`    | Capture MCP, generic tool, retrieval result, and RAG query results |
+| `scan_result`       | On by default. Send a redacted scan text of MCP and generic tool results and of retrieved documents for detection only. Argus does not store it. Env `SENDA_ARGUS_SCAN_RESULT` |
+| `scan_arguments`    | On by default. Send a redacted scan text of MCP and generic tool call arguments for detection only. The text still carries argument strings, so set it to false to stop sending them. Argus does not store it. Env `SENDA_ARGUS_SCAN_ARGUMENTS` |
+| `scan_input`        | On by default. Send a redacted scan text of voice session transcripts for detection only. Raw audio is never sent. Argus does not store it. Env `SENDA_ARGUS_SCAN_INPUT` |
 | `redact`            | Apply redaction to configured sensitive values        |
+| `run_environment`   | `production`, `staging`, `test`, or `evaluation`. Sent at the top level of every event. Other values are dropped. Env `SENDA_ARGUS_RUN_ENVIRONMENT` |
 
 When body capture is disabled, hashes are still useful for correlation without storing raw content.
 
@@ -1031,6 +1157,141 @@ find . -maxdepth 1 -name "*.egg-info" -exec rm -rf {} +
 python -m build
 python -m twine check dist/*
 ```
+
+## Devin sessions and audit logs
+
+Devin runs in a cloud VM, so hooks cannot be installed there. `senda-argus devin-collect` pulls
+sessions, the messages users sent to them, and (optionally) organization audit logs through the
+Devin API v3 and sends them to Argus `/v1/agent-runs/ingest`.
+
+```bash
+export DEVIN_API_KEY=...            # service user key with ViewOrgSessions
+export DEVIN_ORG_ID=org-...
+export SENDA_ARGUS_ENDPOINT=https://argus.example.com
+export SENDA_ARGUS_API_KEY=...      # collector key bound to devin:<org>
+# export SENDA_ARGUS_DEVIN_AUDIT_LOGS=1   # needs ViewAccountAuditLogs (enterprise)
+senda-argus devin-collect --interval 60
+```
+
+- A session start becomes `agent.run.started`, its end `agent.run.completed` or `agent.run.failed`.
+  `run_id` is the Devin session id. The end event carries `exclusive_windows`, the time ranges in
+  which no other session of the organization was running. Argus attaches relay calls of the same
+  organization to the session only inside these ranges.
+- A message a user sent to a session becomes `llm.request` with the same instruction digests as the
+  other instrumentors. The text is sent only with `SENDA_ARGUS_CAPTURE_PROMPT=1`, after redaction.
+- An audit log record becomes `agent.step.completed` in the run `devin-audit:<org>:<date>`. MCP server
+  configuration records carry `configured_mcp_server`, which Argus lists as unobserved.
+- Event ids are derived from Devin ids, and the pull position advances only after Argus accepted the
+  batch, so the same session or record is not sent twice.
+- The API key is read from the environment and is not written to events or state.
+
+## Pre-install MCP server scan
+
+`senda-argus scan-mcp` reads the MCP server definitions on this machine, scans them statically, and
+prints or sends one result per server to Argus `POST /v1/install-scans`.
+
+```bash
+# Print what would be sent. Nothing is sent and no server is started.
+senda-argus scan-mcp
+
+# Scan pre-fetched tools/list JSON with mcp-scanner (YARA only) and send the results.
+export SENDA_ARGUS_ENDPOINT=https://argus.example.com
+export SENDA_ARGUS_API_KEY=...      # collector key
+senda-argus scan-mcp --tools-json github=./github-tools.json --send
+```
+
+Where definitions are read from:
+
+- The locations come from the same product table that `hooks-install` uses (`mcp_sources` in
+  `INSTALLS`, `cli/agent_hooks_install.py`). Files are only read, never written. Files in the current
+  directory are read from that directory only; parent directories are not searched.
+
+| Product | Files and key |
+|---|---|
+| Claude Code | `~/.claude.json` top-level `mcpServers` (scope `user`) and `projects.<path>.mcpServers` (scope `project:<path>`); `./.mcp.json` `mcpServers` (scope `cwd`) |
+| Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json` `mcpServers` |
+| Cursor | `~/.cursor/mcp.json` and `./.cursor/mcp.json` `mcpServers` |
+| Windsurf | `~/.config/devin/mcp_config.json` and `~/.codeium/windsurf/mcp_config.json` `mcpServers` (`serverUrl` or `url` for remote) |
+| VS Code | `./.vscode/mcp.json` `servers` |
+| Cline | `~/.cline/data/settings/cline_mcp_settings.json` `mcpServers` |
+| Codex CLI | `~/.codex/config.toml` `[mcp_servers.<name>]` (needs Python 3.11 or later for `tomllib`) |
+| Gemini CLI | `settings.json` `mcpServers` (user and managed) |
+| Crush | `crush.json` `mcp` |
+
+- Not read by decision, listed under `refused_products` with the reason. This does not change the
+  exit code:
+  - Claude Desktop on Linux (only when the OS has no documented location), VS Code user-profile
+    `mcp.json`, and the Cline IDE extension settings: the absolute location is not written in the
+    official documentation.
+  - Copilot CLI, Qwen Code, Kiro, Amazon Q Developer CLI, Factory Droid, Goose, Augment Code, Junie
+    CLI, and Antigravity: no MCP location is registered in the table.
+- Read failures, listed under `unreadable_products` with the reason, make the exit code 1: a file over
+  4 MiB, no permission, a file that is not a regular file (FIFO, device), a symlink loop, a file that
+  is not valid JSON or TOML (for example JSON with comments), and a file whose root or intermediate
+  value (for example `mcp_servers` or `projects.<path>`) is not an object. A missing key is not a
+  failure.
+- A definition whose `type` is not a string, or that fails unexpectedly, becomes an error item with
+  the reason (only the exception class name); the other servers are still processed.
+- Servers with the same name are separate items when they come from different products, files, or
+  Claude Code projects.
+- The scanned list and the list of configured servers come from the same reader, so the number of
+  items equals `servers_read`. Definitions that cannot be turned into a server (both `command` and
+  `url`, unknown type, too many arguments) are listed with a reason and make the exit code 1.
+
+What the command does by default:
+
+- It never starts a stdio server and never connects to a remote server.
+- It calls the external `mcp-scanner` only for servers given with `--tools-json NAME=PATH` (an MCP
+  `tools/list` result or the bare tools array), as
+  `mcp-scanner --analyzers yara --format raw static --tools <file>`. The LLM and VirusTotal analyzers
+  are never selected, because they send descriptions and hashes outside.
+- `NAME` is the server name, `product:name`, or `product:scope:name`. Scope is `user`, `managed`,
+  `cwd` (a file in the current directory), or `project:<path>` (a Claude Code project in
+  `~/.claude.json`), for example `claude_code:project:/work/app:github=./tools.json`.
+  `--tools-json` is split at the last `=`, so `NAME` may contain `=` (a project path can) and `PATH`
+  must not.
+  Each server uses the most specific `NAME` that matches it. A `NAME` used by servers with different
+  commands or packages, a `NAME` used by no server, or tools JSON over the Argus limits (256 tools,
+  16384 bytes per tool, 262144 bytes in total) is an error, and nothing is scanned.
+- A server without tools JSON, or when `mcp-scanner` is missing, fails, or prints non-JSON, is sent as
+  unscanned with `analyzer_disabled`. A scanner timeout (`--timeout`, default 120 s) is sent as
+  `timeout`. Scanner output over 16 MiB stops the scanner and is sent as `analyzer_disabled`. None of
+  these is reported as clean. `mcp-scanner` is not installed automatically.
+- Sending happens only with `--send`. `--dry-run` always prints and never sends. The endpoint and key
+  are the existing `SENDA_ARGUS_ENDPOINT`, `SENDA_ARGUS_API_KEY`, and `SENDA_ARGUS_TIMEOUT`.
+- A rejection by Argus (for example 422 when the scanner output format differs) is printed with the
+  status and makes the exit code 1.
+
+What is sent per server:
+
+- stdio: `name`, `command`, `args`, the package name and version when the launch is `npx`/`bunx`,
+  `uvx`/`uv tool run`, or `pipx run`, and the sha256 of a local file when the command is a file path,
+  `node`/`python` runs a script file, or `uv run` runs a `.py` file. Relative script paths are resolved
+  only against the definition's `cwd` or `uv --directory`. An unknown flag before the package leaves
+  the package out instead of guessing. No hash is sent when it cannot be computed or the file is over
+  256 MiB.
+- A server whose name, package, version, URL, command, or arguments exceed the Argus limits is not
+  sent; it is listed with the reason and the exit code is 1.
+- remote: `name` and the URL normalized without user info, query, or fragment. A remote URL with a
+  path segment that looks like a secret (for example a key embedded in the path) is not sent and
+  becomes an error item, because replacing the segment would change the artifact key Argus computes.
+- The `mcp-scanner` report and the tools JSON, only when the scan ran.
+
+What is never sent or printed:
+
+- `env` values and `headers` values. Only their key names are printed (`env_keys`, `header_keys`).
+- Secrets inside `args` and `command`: values of `name=value` or `name: value` whose name looks like a
+  secret (token, key, password, auth, cookie, header, ...), the argument after such a flag
+  (`--token VALUE`), known token shapes (GitHub, GitLab, Slack, OpenAI, AWS, Google, npm, PyPI,
+  Hugging Face, JWT, `Bearer`/`Basic`), hex strings of 32 or more characters, UUIDs, strings of 20 or
+  more characters that mix upper case, lower case, and digits, and long opaque random strings. They
+  are replaced with `<redacted>`. URLs in arguments, including the value of `name=URL`, keep the host
+  and the path segments that do not look like secrets; user info anywhere in the argument and the
+  query are replaced. An argument is also split at `;`, `&`, and spaces (connection strings such as
+  `Server=x;Password=...`, command strings such as `node s.js --api-key ...`), and the whole argument
+  is replaced when any piece looks like a secret. A JSON argument keeps its shape, with secret
+  keys and secret-looking values replaced; a JSON argument that does not parse is replaced whole.
+- The artifact key: Argus computes it from the fields above.
 
 ## Test coverage
 

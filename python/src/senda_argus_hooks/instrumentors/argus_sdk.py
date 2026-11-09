@@ -14,18 +14,29 @@ from senda_argus_hooks.core.identity import (
     mcp_data_source_profile,
     normalize_url,
     resolve_mcp_server_name,
+    resolve_mcp_server_url,
 )
 from senda_argus_hooks.core.instruction_files import (
     classify_instruction_write,
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
+from senda_argus_hooks.core.mcp_tools import offered_alternatives
 from senda_argus_hooks.core.purpose_registry import (
     register_mcp_tool_source,
     selected_tool_purpose,
 )
+from senda_argus_hooks.core.result_scan import (
+    arguments_scan_fields,
+    result_scan_fields,
+    scan_source,
+    without_arguments_scan,
+)
 from senda_argus_hooks.core.runtime import emit_event, get_config
+from senda_argus_hooks.core.tool_result import tool_result_is_error
+from senda_argus_hooks.core.unjudged import check_before_action
 
 from .base import BaseInstrumentor, audit_guard
 
@@ -117,7 +128,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                         # (report) は上の consistency 判定にのみ使い、観測でない値を誘導判定へ流さない。
                         observed_offered = _offered_tool_names(kwargs)
                         if observed_offered:
-                            proposed_data["alternatives"] = [{"name": n} for n in observed_offered]
+                            proposed_data["alternatives"] = offered_alternatives(observed_offered)
                         if actual_names:
                             proposed_data["selected_tool"] = actual_names[0]
                         emit_event(
@@ -132,6 +143,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 _sources = collect_instruction_sources(kwargs, args)
                 system_prompt_line_hashes = system_prompt_line_digests(*_sources)
                 system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+                # 語の組が作れない日本語だけの指示のための文の署名。埋め込みと鍵が揃うときだけ出る。
+                system_prompt_semantic_hashes = system_prompt_semantic_digests(*_sources)
                 llm_data = {"provider": provider, "operation": operation, "purpose": purpose, "model": model, "input": input_payload, "output": output_payload}
                 if messages_hash:
                     llm_data["messages_hash"] = messages_hash
@@ -146,6 +159,8 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
                 if system_prompt_pair_hashes:
                     llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+                if system_prompt_semantic_hashes:
+                    llm_data["system_prompt_semantic_hashes"] = system_prompt_semantic_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "provider": provider, "operation": operation},
@@ -164,7 +179,7 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
             arguments = args[1] if len(args) > 1 else kwargs.get("arguments") or {}
             capability = kwargs.get("capability")
             server = resolve_mcp_server_name(obj)
-            server_url = getattr(obj, "url", None) or getattr(obj, "base_url", None) or getattr(obj, "server_url", None)
+            server_url = resolve_mcp_server_url(obj)
             purpose_profile = mcp_data_source_profile(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             purpose_id = derive_purpose_id(mcp_server_name=server, mcp_server_url=server_url, tool_name=tool, capability=capability)
             mcp_profile_id = derive_mcp_profile_id(mcp_server_name=server, mcp_server_url=server_url, tools=list(getattr(obj, "tools", {}).keys()) if hasattr(obj, "tools") else [])
@@ -189,6 +204,11 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 "mcp_profile_id": mcp_profile_id,
                 "arguments_hash": sha256_value(raw_args_payload),
             }
+            # ツールの実行の前に Argus の判定の可否を確認する。止めるときは例外を投げ、実行しない。
+            unjudged = check_before_action(None if tool is None else str(tool))
+            if unjudged is not None:
+                # 判定を省いて実行する呼び出しには、その印と理由の符号を載せる。
+                base_mcp.update(unjudged.as_fields())
             # 組み込みの MCP 経路からも指示ファイルへの書き込みが起こる。別経路の計装だけに
             # 分類を置くと、こちらを通る書き込みが観測されず伝播の起点が欠ける。
             _written = classify_instruction_write(arguments)
@@ -196,10 +216,12 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 base_mcp.update(_written)
             if cfg.capture_arguments:
                 base_mcp["arguments"] = args_payload
+            if cfg.scan_arguments and operation == "call_tool":
+                base_mcp.update(arguments_scan_fields(arguments))
             emit_event(
                 "mcp.tool_call.requested",
                 source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},
-                data={"mcp": base_mcp},
+                data={"mcp": without_arguments_scan(base_mcp)},
                 status="start",
                 purpose_id=purpose_id,
             )
@@ -227,6 +249,13 @@ class ArgusSDKInstrumentor(BaseInstrumentor):
                 if result_payload is not None:
                     completed_mcp["result"] = result_payload
                 completed_mcp["result_hash"] = sha256_value(raw_result)
+                # 結果の本文を送らない設定でも、エラーの印だけは常に送る。判別できない形なら載せない。
+                is_error = tool_result_is_error(response)
+                if is_error is not None:
+                    completed_mcp["is_error"] = is_error
+                if cfg.scan_result:
+                    # 本文を送らない既定でも、戻り値に埋め込まれた指示が注入の規則に届くようにする。
+                    completed_mcp.update(result_scan_fields(scan_source(response)))
                 emit_event(
                     "mcp.tool_call.completed",
                     source={"component": "instrumentor", "sdk": "senda_argus_hooks.sdk", "operation": operation},

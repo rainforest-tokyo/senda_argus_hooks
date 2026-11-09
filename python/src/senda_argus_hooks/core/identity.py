@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import socket
 import sys
 from typing import Any
@@ -21,6 +22,24 @@ def stable_hash(value: Any, *, prefix: str, length: int = 16) -> str:
 # 承認の候補にも出さない。承認すると、名前を持たない全てのセッションのツールが承認済みになるため。
 UNNAMED_MCP_SERVER = "unknown"
 
+# MCP の SDK のセッションは、初期化の応答が名乗ったサーバ名を保持しない。計装が初期化の応答から読んで
+# セッションへ控える属性。明示の名前が無いときにだけ使う。
+SERVER_INFO_NAME_ATTR = "_senda_argus_server_info_name"
+# 初期化の応答が名乗った版を控える属性。脆弱性の照合に使う。
+SERVER_INFO_VERSION_ATTR = "_senda_argus_server_info_version"
+
+# 利用者が describe_mcp_session で明示したサーバの URL を控える属性。SDK のセッションは URL を持たない。
+SERVER_URL_ATTR = "_senda_argus_server_url"
+
+
+def resolve_mcp_server_url(obj: Any) -> Any:
+    """MCP クライアントのオブジェクトからサーバの URL を読む。明示の値を先に読む。"""
+    for attr in (SERVER_URL_ATTR, "url", "base_url", "server_url"):
+        value = getattr(obj, attr, None)
+        if value:
+            return value
+    return None
+
 
 def resolve_mcp_server_name(obj: Any) -> Any:
     """MCP クライアントのオブジェクトからサーバ名を読む。
@@ -28,7 +47,7 @@ def resolve_mcp_server_name(obj: Any) -> Any:
     計装ごとに読み方を変えない。読む属性が違うと、同じセッションが計装によって別のサーバ名で
     記録され、承認したサーバと観測したサーバが一致しなくなる。空の値は持たないものとして扱う。
     """
-    for attr in ("server", "server_name", "name"):
+    for attr in ("server", "server_name", "name", SERVER_INFO_NAME_ATTR):
         value = getattr(obj, attr, None)
         if value:
             return value
@@ -44,11 +63,12 @@ def normalize_url(url: str | None) -> str | None:
     try:
         parts = urlsplit(raw)
         scheme = parts.scheme.lower()
-        netloc = parts.netloc.lower()
+        # URL に埋め込まれた資格情報は記録にも識別子の材料にも載せない
+        netloc = parts.netloc.rpartition("@")[2].lower()
         path = parts.path.rstrip("/") or "/"
         return urlunsplit((scheme, netloc, path, "", ""))
     except Exception:  # noqa: BLE001 - 観測の失敗で計装対象の呼び出しを止めない
-        return raw.lower().rstrip("/")
+        return re.sub(r"(?<=://)[^/?#]*@", "", raw).lower().rstrip("/")
 
 
 def _clean(value: Any) -> Any:

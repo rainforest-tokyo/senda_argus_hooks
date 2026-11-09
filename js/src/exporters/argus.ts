@@ -1,41 +1,218 @@
 import type { EventRecord, Exporter } from "../core/types.js";
+import { fallbackRunId } from "../core/event.js";
+import { signHeaders } from "../deviceIdentity.js";
+import { CHAIN_FIELD, RecordChain } from "../core/recordChain.js";
+
+// 捨てた記録の時間帯を報告する宛先と、持つ時間帯の数と、前の時間帯へ寄せる間隔。
+const DISCARD_PATH = "/v1/hooks/discards";
+const MAX_DISCARD_WINDOWS = 32;
+// 捨てた記録の番号の範囲を持つ数。受け取り側は、宣言された範囲の飛びを、宣言の無い飛びと区別して数える。
+const MAX_DISCARD_RANGES = 64;
+const DISCARD_MERGE_SEC = 60;
+// 受け取り側が受ける時間帯の範囲。送る前に同じ範囲へ切り詰め、範囲外で報告ごと拒まれないようにする。
+const DISCARD_MAX_SPAN = 7 * 86400;
+const DISCARD_MAX_AGE = 30 * 86400;
+// 受け取り側が 1 つの時間帯に受ける件数の上限。超えた時間帯は、他が受かる報告でも黙って捨てられる。
+const DISCARD_MAX_COUNT = 100_000;
+
+type DiscardWindow = { from: number; to: number; count: number };
+type SeqRange = { session: string; from: number; to: number };
+
+// 時間帯を開始の順を保って足す。前後 DISCARD_MERGE_SEC の内で重なる時間帯は 1 つにまとめる。末尾へ足す
+// だけだと、遅れた記録や時計の補正で古い範囲が来たとき並びが時刻の順でなくなり、上限での退避が離れた 2 つを寄せる。
+function addWindow(windows: DiscardWindow[], from: number, to: number, count: number): DiscardWindow[] {
+  const kept: DiscardWindow[] = [];
+  let lo = from;
+  let hi = to;
+  let n = count;
+  for (const w of windows) {
+    if (lo <= w.to + DISCARD_MERGE_SEC && hi >= w.from - DISCARD_MERGE_SEC) {
+      lo = Math.min(lo, w.from);
+      hi = Math.max(hi, w.to);
+      n += w.count;
+    } else {
+      kept.push(w);
+    }
+  }
+  kept.push({ from: lo, to: hi, count: n });
+  return kept.sort((a, b) => a.from - b.from);
+}
+
+// 数が上限を超えたら、時刻の間隔が最も狭い隣り合う 2 つを 1 つにまとめる。件数は失わない。
+function boundWindows(windows: DiscardWindow[]): DiscardWindow[] {
+  while (windows.length > MAX_DISCARD_WINDOWS) {
+    let best = 0;
+    for (let i = 1; i < windows.length - 1; i += 1) {
+      if (windows[i + 1].from - windows[i].to < windows[best + 1].from - windows[best].to) best = i;
+    }
+    const a = windows[best];
+    const b = windows[best + 1];
+    windows.splice(best, 2, { from: Math.min(a.from, b.from), to: Math.max(a.to, b.to), count: a.count + b.count });
+  }
+  return windows;
+}
 
 export class ArgusExporter implements Exporter {
   private readonly url: string;
+  private readonly discardUrl: string;
   private readonly apiKey: string;
   private readonly runId?: string;
   private readonly timeoutMs: number;
   private readonly pending = new Set<Promise<void>>();
+  // 届かなかった記録の時間帯。送信が回復した後に Argus へ報告する。受け取り側はこの時間帯の中継に
+  // だけある記録を、hooks の記録の欠落ではなく取り込みの欠落として数える。
+  private discards: DiscardWindow[] = [];
+  private seqRanges: SeqRange[] = [];
+  private reporting = false;
+  private readonly chain = new RecordChain();
+  // セッションの終了の通知を、通常の記録と同じ項目で組み立てる関数。runtime が、設定を持つ側で渡す。
+  sessionEnd?: (session: string, lastSeq: number) => EventRecord;
+
+  get ingestUrl(): string { return this.url; }
+  chainPosition(): { session: string; lastSeq: number } { return this.chain.position(); }
+  get key(): string { return this.apiKey; }
+  get base(): string { return this.url.replace(/\/v1\/agent-runs\/ingest$/, ""); }
+  get discardWindows(): DiscardWindow[] { return this.discards.map((w) => ({ ...w })); }
 
   constructor(endpoint = "http://localhost:8000", apiKey = "", runId?: string, timeoutMs = 10000) {
-    this.url = `${endpoint.replace(/\/$/, "")}/v1/agent-runs/ingest`;
+    const base = endpoint.replace(/\/$/, "");
+    this.url = `${base}/v1/agent-runs/ingest`;
+    this.discardUrl = `${base}${DISCARD_PATH}`;
     this.apiKey = apiKey;
     this.runId = runId;
     this.timeoutMs = timeoutMs;
   }
 
+  // 終了の待ち合わせに入れずに送る。canary の送信でプロセスの終了を待たせない。
+  emitUntracked(event: EventRecord): void {
+    void this.send(this.chain.stamp(event) as EventRecord, true);
+  }
+
   emit(event: EventRecord): void {
-    const enriched = this.runId && !event.run_id ? { ...event, run_id: this.runId } : event;
-    const task = this.send(enriched).finally(() => this.pending.delete(task));
+    // 送り先に run を指定したときは、計装が付けたプロセスの既定の run より指定を優先する。
+    const enriched = this.runId && (!event.run_id || event.run_id === fallbackRunId()) ? { ...event, run_id: this.runId } : event;
+    // 通し番号は、記録を捉えた時点で付ける。送信が失敗しても、捨てた記録は番号を持つ。
+    const task = this.send(this.chain.stamp(enriched) as EventRecord).finally(() => this.pending.delete(task));
     this.pending.add(task);
   }
 
-  private async send(event: EventRecord): Promise<void> {
+  private headers(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.apiKey) headers["X-API-Key"] = this.apiKey;
+    return headers;
+  }
+
+  // 捨てた記録の時刻を時間帯に寄せる。数に上限を置き、超えたら古い時間帯を次へ寄せる。
+  noteDiscard(timestamp: unknown): void {
+    const parsed = typeof timestamp === "string" ? Date.parse(timestamp) / 1000 : Number.NaN;
+    const at = Number.isFinite(parsed) ? parsed : Date.now() / 1000;
+    this.discards = boundWindows(addWindow(this.discards, at, at, 1));
+  }
+
+  // 捨てた記録の番号の範囲を持つ。同じセッションで続く範囲は 1 つに寄せ、数に上限を置く。
+  private noteSeqRange(session: string, from: number, to: number): void {
+    for (const item of this.seqRanges) {
+      if (item.session === session && from <= item.to + 1 && to >= item.from - 1) {
+        item.from = Math.min(item.from, from);
+        item.to = Math.max(item.to, to);
+        return;
+      }
+    }
+    this.seqRanges.push({ session, from, to });
+    if (this.seqRanges.length > MAX_DISCARD_RANGES) this.seqRanges = this.seqRanges.slice(-MAX_DISCARD_RANGES);
+  }
+
+  private noteLost(event: EventRecord): void {
+    this.noteDiscard((event as { timestamp?: unknown }).timestamp);
+    const meta = (event as unknown as Record<string, unknown>)[CHAIN_FIELD] as { session?: unknown; seq?: unknown } | undefined;
+    if (meta && typeof meta.session === "string" && Number.isInteger(meta.seq)) {
+      this.noteSeqRange(meta.session, meta.seq as number, meta.seq as number);
+    }
+  }
+
+  // 持っている時間帯を 1 回だけ報告する。届かなければ戻し、次の成功で送る。
+  private static clip(windows: DiscardWindow[], now: number): DiscardWindow[] {
+    const out: DiscardWindow[] = [];
+    for (const w of windows) {
+      const to = Math.min(w.to, now);
+      const from = Math.min(Math.max(w.from, to - DISCARD_MAX_SPAN), to);
+      if (from < now - DISCARD_MAX_AGE) continue;
+      // 件数が上限を超えると、受け取り側は時間帯ごと捨てる。上限へ切り詰めて時間帯を残す。
+      out.push({ from, to, count: Math.min(Math.max(w.count, 1), DISCARD_MAX_COUNT) });
+    }
+    return out;
+  }
+
+  private async reportDiscards(): Promise<void> {
+    if (this.reporting || (this.discards.length === 0 && this.seqRanges.length === 0)) return;
+    this.reporting = true;
+    const windows = ArgusExporter.clip(this.discards, Date.now() / 1000);
+    const ranges = this.seqRanges;
+    this.discards = [];
+    this.seqRanges = [];
+    if (windows.length === 0 && ranges.length === 0) {
+      this.reporting = false;
+      return;
+    }
+    let delivered = false;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    timer?.unref?.();
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (this.apiKey) headers["X-API-Key"] = this.apiKey;
-      await fetch(this.url, {
+      const body = JSON.stringify({ windows, ranges });
+      const res = await fetch(this.discardUrl, {
         method: "POST",
-        headers,
-        body: JSON.stringify({ events: [event] }),
+        headers: { ...this.headers(), ...signHeaders(body) },
+        body,
         signal: controller.signal,
       });
+      // 4xx は送り直しても同じ拒否になるので、届いたものとして戻さない。
+      delivered = res.ok || (res.status >= 400 && res.status < 500);
+    } catch {
+      delivered = false;
+    } finally {
+      clearTimeout(timer);
+      if (!delivered) {
+        let merged = this.discards;
+        for (const w of windows) merged = addWindow(merged, w.from, w.to, w.count);
+        this.discards = boundWindows(merged);
+        for (const r of ranges) this.noteSeqRange(r.session, r.from, r.to);
+      }
+      this.reporting = false;
+    }
+  }
+
+  private async send(event: EventRecord, untracked = false): Promise<void> {
+    const controller = new AbortController();
+    // 待ち合わせに入れない送信は、中断のタイマーでもプロセスの終了を引き止めない。
+    const timer = setTimeout(() => controller.abort(), untracked ? Math.min(this.timeoutMs, 5000) : this.timeoutMs);
+    if (untracked) timer?.unref?.();
+    let delivered = false;
+    try {
+      const body = JSON.stringify({ events: [event] });
+      const res = await fetch(this.url, {
+        method: "POST",
+        headers: { ...this.headers(), ...signHeaders(body) },
+        body,
+        signal: controller.signal,
+      });
+      delivered = res.ok;
     } catch {
       // Fail open: observability must not break the agent.
     } finally {
       clearTimeout(timer);
+    }
+    if (untracked) {
+      // 届かなかった番号は、捨てた記録として宣言する。宣言が無いと、受け取り側は番号の飛びを偽の欠落と見る。
+      if (!delivered) this.noteLost(event);
+      return;
+    }
+    if (delivered) {
+      await this.reportDiscards();
+    } else {
+      // 接続の失敗と、401、403、429 など拒まれた送信。どちらも届かなかった記録として数え、取り込みが
+      // 回復した後に時間帯を報告する。数えないと、受け取り側がその間の中継にだけある記録を hooks の欠落として警報にする。
+      this.noteLost(event);
     }
   }
 
@@ -43,5 +220,14 @@ export class ArgusExporter implements Exporter {
     await Promise.allSettled([...this.pending]);
   }
 
-  async shutdown(): Promise<void> { await this.flush(); }
+  // 終了の時に、セッションの終了を 1 回だけ送る。記録を 1 件も送っていないときは、送るものが無い。
+  // 終了の通知が無く途切れたセッションを、受け取り側は未終了として数える。
+  async shutdown(): Promise<void> {
+    await this.flush();
+    const build = this.sessionEnd;
+    if (!build) return;
+    const event = this.chain.stampEnd((session, lastSeq) => build(session, lastSeq));
+    if (!event) return;
+    await this.send(event as unknown as EventRecord, true);
+  }
 }

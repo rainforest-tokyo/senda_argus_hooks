@@ -11,7 +11,9 @@ from senda_argus_hooks.core.instruction_files import (
     collect_instruction_sources,
     system_prompt_line_digests,
     system_prompt_pair_digests,
+    system_prompt_semantic_digests,
 )
+from senda_argus_hooks.core.mcp_tools import offered_alternatives
 from senda_argus_hooks.core.response_meta import (
     extract_response_model as _extract_response_model,
 )
@@ -108,6 +110,8 @@ class OllamaInstrumentor(BaseInstrumentor):
                 _sources = collect_instruction_sources(kwargs, args)
                 system_prompt_line_hashes = system_prompt_line_digests(*_sources)
                 system_prompt_pair_hashes = system_prompt_pair_digests(*_sources)
+                # 語の組が作れない日本語だけの指示のための文の署名。埋め込みと鍵が揃うときだけ出る。
+                system_prompt_semantic_hashes = system_prompt_semantic_digests(*_sources)
                 llm_data: dict[str, Any] = {
                     "provider": "ollama",
                     "operation": operation,
@@ -130,6 +134,8 @@ class OllamaInstrumentor(BaseInstrumentor):
                 # 黙って止まる。2 つは別々の導出で、片方が空でももう片方は成立する。
                 if system_prompt_pair_hashes:
                     llm_data["system_prompt_pair_hashes"] = system_prompt_pair_hashes
+                if system_prompt_semantic_hashes:
+                    llm_data["system_prompt_semantic_hashes"] = system_prompt_semantic_hashes
                 emit_event(
                     "llm.request",
                     source={"component": "instrumentor", "sdk": "ollama", "provider": "ollama", "operation": operation},
@@ -140,7 +146,7 @@ class OllamaInstrumentor(BaseInstrumentor):
                 offered = _offered_tool_names(kwargs)
                 selected = _selected_tool_names(response)
                 if offered and selected:
-                    alternatives = [{"name": name} for name in offered]
+                    alternatives = offered_alternatives(offered)
                     for selected_tool in selected:
                         emit_event(
                             "agent.decision",

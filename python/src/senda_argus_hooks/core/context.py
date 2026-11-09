@@ -14,6 +14,21 @@ class RuntimeConfig:
     capture_response: bool = False
     capture_arguments: bool = False
     capture_result: bool = False
+    # 戻り値の本文とは別に、検知の走査だけに使う文を送る。本文は保存されるが、この文は Argus が
+    # 判定の後に捨てる。既定で送らないと、戻り値に埋め込まれた指示が規則に届かない。
+    scan_result: bool = True
+    # 呼び出しの引数から、検知の走査だけに使う文を送る。本文の保存は capture_arguments が決める。
+    # 既定で送らないと、引数を読む規則に呼び出しの中身が届かず、シェルの命令も資格情報のファイルの名前も
+    # 検知できない。秘匿した文でも引数の文字は残るため、送らない導入は無効にする。Argus は判定の後に捨てる。
+    scan_arguments: bool = True
+    # 推論へ渡った利用者側の入力、すなわち音声のセッションの発話の文字起こしから、検知の走査だけに
+    # 使う文を送る。本文の保存は capture_prompt が決める。既定で送らないと、話し言葉に紛れた指示が
+    # 規則に届かない。
+    scan_input: bool = True
+    # ツールの実行の前に Argus の判定を問い合わせ、拒否と承認待ちの呼び出しを止める。既定は無効。
+    enforce_precheck: bool = False
+    # 判定に接続できないときに通すか。
+    precheck_fail_open: bool = True
     capture_hash: bool = True
     redact: bool = True
     actor: dict[str, Any] = field(default_factory=dict)
@@ -25,6 +40,9 @@ class RuntimeConfig:
     agent_id: str | None = None
     purpose_id: str | None = None
     agent_hint: str | None = None
+    # 実行環境の札。production と staging と test と evaluation に限る。受け取り側は試験と評価の札が
+    # 付いた run からの外部への通信を検知する。設定に無い値は載せない。
+    run_environment: str | None = None
 
 
 def new_run_id() -> str:

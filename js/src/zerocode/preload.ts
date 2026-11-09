@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire, register as registerLoader } from "node:module";
 import { register } from "../register.js";
-import { shutdown } from "../runtime.js";
+import { markInstrumented, shutdown } from "../runtime.js";
+import { startFromEnv } from "../onboarding.js";
 import { instrumentOpenAI } from "../instrumentors/openai.js";
 import { instrumentAnthropic } from "../instrumentors/anthropic.js";
 import { instrumentOllama } from "../instrumentors/ollama.js";
@@ -148,11 +149,16 @@ if (enabledValue(process.env.SENDA_ARGUS_ENABLED, true)) {
     register({
       project: process.env.SENDA_ARGUS_PROJECT ?? "default",
       environment: process.env.SENDA_ARGUS_ENVIRONMENT ?? "prod",
+      runEnvironment: process.env.SENDA_ARGUS_RUN_ENVIRONMENT,
       exporters: exportersFromEnv(),
       capturePrompt: truthy(process.env.SENDA_ARGUS_CAPTURE_PROMPT),
       captureResponse: truthy(process.env.SENDA_ARGUS_CAPTURE_RESPONSE),
       captureArguments: truthy(process.env.SENDA_ARGUS_CAPTURE_ARGUMENTS),
       captureResult: truthy(process.env.SENDA_ARGUS_CAPTURE_RESULT),
+      scanResult: enabledValue(process.env.SENDA_ARGUS_SCAN_RESULT, true),
+      scanArguments: enabledValue(process.env.SENDA_ARGUS_SCAN_ARGUMENTS, true),
+      enforcePrecheck: enabledValue(process.env.SENDA_ARGUS_ENFORCE_PRECHECK, false),
+      precheckFailOpen: enabledValue(process.env.SENDA_ARGUS_PRECHECK_FAIL_OPEN, true),
       captureHash: enabledValue(process.env.SENDA_ARGUS_CAPTURE_HASH, true),
       redact: enabledValue(process.env.SENDA_ARGUS_REDACT, true),
       tenantId: process.env.SENDA_ARGUS_TENANT_ID,
@@ -166,8 +172,11 @@ if (enabledValue(process.env.SENDA_ARGUS_ENABLED, true)) {
     });
     patchCommonJs();
     eagerPatchCommonJsTargets();
+    // 読み込みの差し替えを入れた時点で、以後に読み込まれる SDK は計装される。
+    markInstrumented();
     try { registerLoader(new URL("./loader.js", import.meta.url)); } catch {}
     try { process.once("beforeExit", () => { void shutdown(); }); } catch {}
+    try { startFromEnv(); } catch {}
     if (truthy(process.env.SENDA_ARGUS_BOOTSTRAP_DEBUG)) {
       console.error("[senda-argus] Node zero-code preload enabled");
     }

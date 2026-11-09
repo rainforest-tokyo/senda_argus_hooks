@@ -18,7 +18,7 @@ It collects normalized execution events from runtime hooks, monkey patches, call
 - OpenAI Agents, LangChain, LangGraph, LlamaIndex / RAG integrations
 - JSONL / stdout / Parquet / Argus exporters
 - Redaction and capture controls
-- Senda Arugus Agent Studio for Runtime, Trace, Logs, and Multi-Agent Workflow management
+- Senda Argus Agent Studio for Runtime, Trace, Logs, and Multi-Agent Workflow management
 
 ## Repository layout
 
@@ -28,7 +28,7 @@ senda-argus-hooks/
 ├─ js/              # Node.js / TypeScript SDK and integrations
 ├─ browser/         # Browser hook package
 ├─ docker/          # Hook-enabled Python / Node runtimes
-├─ agent-studio/    # Senda Arugus Agent Studio WebUI / control plane
+├─ agent-studio/    # Senda Argus Agent Studio WebUI / control plane
 ├─ tools/           # Zero-code deployment tools
 ├─ scripts/         # Docker install / status / runtime-create helpers
 ├─ README.md
@@ -92,7 +92,7 @@ supervisor.*
 orchestrator.*
 ```
 
-## Senda Arugus Agent Studio
+## Senda Argus Agent Studio
 
 `agent-studio/` provides the Docker-based control plane and observability UI.
 
@@ -194,9 +194,24 @@ SENDA_ARGUS_CAPTURE_PROMPT=false
 SENDA_ARGUS_CAPTURE_RESPONSE=false
 SENDA_ARGUS_CAPTURE_ARGUMENTS=false
 SENDA_ARGUS_CAPTURE_RESULT=false
+SENDA_ARGUS_SCAN_RESULT=true
+SENDA_ARGUS_SCAN_ARGUMENTS=true
+SENDA_ARGUS_SCAN_INPUT=true
 SENDA_ARGUS_CAPTURE_HASH=true
 SENDA_ARGUS_REDACT=true
 ```
+
+`SENDA_ARGUS_SCAN_RESULT` is separate from result capture. It sends a redacted scan text of each MCP and generic tool result and of retrieved documents, capped at 32768 characters with the head and tail kept, so that Argus can detect instructions embedded in tool results. Argus uses it for detection only and does not store it. Set it to `false` to stop sending it; Argus then cannot detect instructions in tool results on the agent-run path.
+
+`SENDA_ARGUS_SCAN_ARGUMENTS` is on by default and separate from argument capture. It sends a redacted scan text of the arguments of each MCP and generic tool call, capped at 32768 characters with the head and tail kept, so that the argument rules (shell commands, credential files, sandbox escapes, cloud discovery, system prompt probing) can fire when argument bodies are not captured. Secrets are redacted before the text is built, but the text still carries the argument strings, which can include file contents and message bodies. Argus uses it for detection only and does not store it. Local exporters write the event as built, so the scan text also appears in their output. Set it to `false` to stop sending it; the argument rules then only see the tool name.
+
+`SENDA_ARGUS_ENFORCE_PRECHECK` is off by default. When enabled, MCP and LangChain tool calls ask Argus before running, and a denied or pending call raises `ToolCallBlocked` and does not run the tool. The API key must be bound to the agent; a key without a bound agent is judged at the strictest tier. `SENDA_ARGUS_PRECHECK_FAIL_OPEN` decides whether a call runs when Argus cannot be reached, and defaults to `true`.
+
+`SENDA_ARGUS_SCAN_INPUT` does the same for the user side of a voice session: the transcript of each utterance is sent as a redacted scan text with the same cap, so that instructions spoken into the room reach the injection rules. Raw audio is never sent. Argus uses it for detection only and does not store it.
+
+`SENDA_ARGUS_RUN_ENVIRONMENT` tags every event with the environment the agent runs in. Only `production`, `staging`, `test`, and `evaluation` are sent; other values are dropped. Argus alerts when a run tagged `test` or `evaluation` calls an external host. The tag comes only from this setting, never from the event body.
+
+MCP tool calls always carry `egress_hosts` and `monitor_targets`, even when arguments are not captured. They hold only normalized host names and the names of monitoring components a call would rewrite, never the argument body. When an MCP server lists a tool with `readOnlyHint`, a body-less call to that tool is sent as a read of the resource it names.
 
 Exported events, Workflow traces, and Runtime logs are security-sensitive data. Do not commit credentials or sensitive outputs to Git.
 
