@@ -26,6 +26,10 @@ senda-agent run --config examples/ollama.json \
 
 `max_replans` の既定値は `-1` です。`0` は初回計画のみ、正の整数はワーカーとゴール判定からの再計画を合わせた上限です。Ctrl-Cで実行を中止できます。CLIの終了コードは達成時が `0`、再計画上限による未達が `2`、エラーが `1`、中止が `130` です。
 
+`--criterion` はゴール判定に渡す任意の完了条件です。複数の条件を指定する場合は、条件ごとに `--criterion` を繰り返します。
+
+`senda-agent run` の `--show-prompts` はLLMへのシステムプロンプト・出力JSONスキーマ・入力本文を、`--show-responses` はLLMから受け取った本文をJSON検証前に標準エラー出力へ表示します。送信と受信は見出しで区切り、JSONはインデント付きで表示します。両方を指定すると、役割、`run_id`、`turn_id` で送受信を照合できます。表示にはRAGやMCPから取得した本文が含まれる場合があります。
+
 ## 情報源とファクト
 
 `llm.default.rag` にSQLiteの `path` と一回の最大取得件数 `limit` を指定します。取り込みはYAML、プレーンテキスト、Markdownに対応しています。YAMLは `id` と `info` 内の `name`、`description`、`severity`、`tags` を取り込み、元ファイルのパスを出典にします。SQLiteの `documents` テーブルには `id`、`title`、`body`、`source`、`metadata` が入ります。
@@ -62,3 +66,22 @@ SENDA_TEST_OLLAMA=1 python -m pytest tests/test_ollama.py
 ```
 
 実機テストはOpenAI互換APIで `qwen3-coder:30b` を呼び、SQLiteからの取得、ファクトの記録、ゴール判定とHookの実行IDを確認します。
+
+### Ollamaで3周回の再計画を確認
+
+```bash
+SENDA_TEST_OLLAMA=1 python -m pytest -q -s tests/test_ollama.py -k replans_across_rounds
+```
+
+再現のため、サンプル設定は初回に存在しない旧資料名を検索します。1周目は0件でワーカーから再計画します。2周目は営業時間と照会コードを取得しますが、連絡先の根拠がまだ足りないためゴール判定から再計画します。3周目は先に得た照会コードで連絡先資料を取得し、ゴール判定が2件のファクトを根拠に完了を返すことを確認します。
+
+同じシナリオをCLIから実行すると、各役割のプロンプトとレスポンスも確認できます。1周回の中で各役割がLLMを呼ぶため、このシナリオでは3周回の間に複数の送受信が表示されます。
+
+```bash
+senda-agent import --db .local/replan-knowledge.sqlite examples/replan/documents
+senda-agent run --config examples/replan/ollama.json --show-prompts --show-responses \
+  --purpose '窓口案内の確認' \
+  --goal '平日の窓口の営業時間と、問い合わせ用メールアドレスを資料から確認する。' \
+  --criterion '平日の開始・終了時刻を根拠付きで確認できる。' \
+  --criterion '問い合わせ用メールアドレスを根拠付きで確認できる。'
+```

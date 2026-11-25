@@ -1,0 +1,5 @@
+id: replan-office-hours
+info:
+  name: サンプル窓口の営業時間
+  description: サンプル窓口の受付は平日09:00から17:00までです。連絡先資料の照会コードは RPN-C7K2 です。
+  tags: [窓口, 営業時間]

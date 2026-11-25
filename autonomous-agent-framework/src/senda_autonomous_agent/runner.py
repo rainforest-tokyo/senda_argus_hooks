@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
+from functools import partial
 from time import perf_counter
 from typing import Any, NotRequired, TypedDict
 from uuid import uuid4
 
+from langchain_core.messages import BaseMessage
 from langgraph.graph import END, START, StateGraph
 from senda_argus_hooks.core.context import new_run_id, reset_run_id, reset_trace_id, set_run_id, set_trace_id
 
@@ -30,16 +32,38 @@ class RoundState(TypedDict):
     decision: NotRequired[GoalDecision]
 
 
-class AgentRunner:
-    def __init__(self, config: AgentConfig, *, client_factory: Callable[[Role, LLMConfig], Any] | None = None):
-        self.config = config
-        self.planner = Planner(self._model("planner", client_factory))
-        self.worker_model = self._model("worker", client_factory)
-        self.goal_judge = GoalJudge(self._model("goal_judge", client_factory))
+PromptObserver = Callable[[Role, str, Sequence[BaseMessage]], None]
+ResponseObserver = Callable[[Role, str, BaseMessage], None]
 
-    def _model(self, role: Role, factory: Callable[[Role, LLMConfig], Any] | None) -> JSONModel:
+
+class AgentRunner:
+    def __init__(
+        self,
+        config: AgentConfig,
+        *,
+        client_factory: Callable[[Role, LLMConfig], Any] | None = None,
+        on_prompt: PromptObserver | None = None,
+        on_response: ResponseObserver | None = None,
+    ):
+        self.config = config
+        self.planner = Planner(self._model("planner", client_factory, on_prompt, on_response))
+        self.worker_model = self._model("worker", client_factory, on_prompt, on_response)
+        self.goal_judge = GoalJudge(self._model("goal_judge", client_factory, on_prompt, on_response))
+
+    def _model(
+        self,
+        role: Role,
+        factory: Callable[[Role, LLMConfig], Any] | None,
+        on_prompt: PromptObserver | None,
+        on_response: ResponseObserver | None,
+    ) -> JSONModel:
         settings = self.config.llm.for_role(role)
-        return JSONModel(settings, client=factory(role, settings) if factory else None)
+        return JSONModel(
+            settings,
+            client=factory(role, settings) if factory else None,
+            on_prompt=partial(on_prompt, role) if on_prompt is not None else None,
+            on_response=partial(on_response, role) if on_response is not None else None,
+        )
 
     async def run(self, goal: Goal) -> RunResult:
         state = RunState(goal=goal, run_id=new_run_id())

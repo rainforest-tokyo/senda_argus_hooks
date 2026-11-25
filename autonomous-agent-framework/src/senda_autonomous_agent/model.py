@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 from senda_argus_hooks.core.context import new_turn_id, reset_turn_id, set_turn_id
@@ -21,8 +22,17 @@ class ModelOutputError(ValueError):
 
 
 class JSONModel:
-    def __init__(self, config: LLMConfig, client: Any = None):
+    def __init__(
+        self,
+        config: LLMConfig,
+        client: Any = None,
+        *,
+        on_prompt: Callable[[str, Sequence[BaseMessage]], None] | None = None,
+        on_response: Callable[[str, BaseMessage], None] | None = None,
+    ):
         self.system_prompt = config.system_prompt
+        self.on_prompt = on_prompt
+        self.on_response = on_response
         self.client = client if client is not None else ChatOpenAI(
             model=config.model, base_url=config.base_url, api_key=config.api_key(),
             timeout=config.timeout, max_retries=0, temperature=0, use_responses_api=False,
@@ -44,7 +54,11 @@ class JSONModel:
         for attempt in range(2):
             token = set_turn_id(new_turn_id())
             try:
+                if self.on_prompt is not None:
+                    self.on_prompt(schema.__name__, tuple(messages))
                 response = await self.client.ainvoke(messages, config={"callbacks": [self.callback]})
+                if self.on_response is not None:
+                    self.on_response(schema.__name__, response)
             finally:
                 reset_turn_id(token)
             try:

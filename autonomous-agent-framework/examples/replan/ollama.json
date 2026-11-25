@@ -1,0 +1,27 @@
+{
+  "llm": {
+    "default": {
+      "provider": "openai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen3-coder:30b",
+      "timeout": 180,
+      "system_prompt": "窓口案内には取得した資料を根拠として使ってください。",
+      "rag": {"backend": "sqlite", "path": ".local/replan-knowledge.sqlite", "limit": 1},
+      "mcp": []
+    },
+    "overrides": {
+      "planner": {
+        "system_prompt": "この検証の1回の計画は検索1件です。steps は要素1つの配列にし、その要素は api=retrieve_from_rag、arguments.keywords に検索語1つ、arguments.filters に空配列を持ちます。replan_request が null の初回は旧資料名『旧窓口案内A0』で検索します。再計画では蓄積済みファクトを調べます。営業時間の資料が未取得なら『営業時間』で検索します。連絡先資料は営業時間の資料に記載された照会コードで検索する必要があります。コードを取得した後の計画で、そのコードをそのまま検索語に使います。"
+      },
+      "worker": {
+        "system_prompt": "この検証では次の操作を、今回の attempts の status だけで選びます。collected が1件でもあれば next_call は {\"api\":\"evaluate_goal\",\"arguments\":{}} です。例えば営業時間が取得できてメールアドレスが不足していても evaluate_goal を選び、不足は findings に記載します。収集できた資料が0件の場合だけ next_call を {\"api\":\"revise_plan\",\"arguments\":{}} にします。"
+      },
+      "goal_judge": {
+        "system_prompt": "窓口の営業時間と問い合わせ用メールアドレスの両方を、蓄積済みファクトから確認できた時点で達成とします。達成時には根拠として両方のファクトIDを返してください。片方が不足している場合は、必要な資料を missing_evidence に挙げてプランナーへ戻してください。"
+      }
+    }
+  },
+  "max_replans": 2,
+  "facts_dir": "facts",
+  "hook_exporters": [{"type": "jsonl", "path": ".local/replan-hooks.jsonl"}]
+}
