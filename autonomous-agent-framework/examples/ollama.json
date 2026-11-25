@@ -1,0 +1,16 @@
+{
+  "llm": {
+    "default": {
+      "provider": "openai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen3-coder:30b",
+      "timeout": 180,
+      "system_prompt": "社内案内の質問には、取得した資料と出典を根拠に回答してください。",
+      "rag": {"backend": "sqlite", "path": ".local/knowledge.sqlite", "limit": 5},
+      "mcp": []
+    }
+  },
+  "max_replans": -1,
+  "facts_dir": "facts",
+  "hook_exporters": [{"type": "jsonl", "path": ".local/hooks.jsonl"}]
+}

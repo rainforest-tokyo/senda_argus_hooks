@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "senda-autonomous-agent"
+version = "0.1.0"
+description = "Autonomous planner, worker, and goal judge with Senda-Argus Hooks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "senda-argus-hooks>=0.8.0",
+    "langchain-core>=1,<2",
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+    "pydantic>=2.7,<3",
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.20,<2", "jsonschema>=4.22,<5", "referencing>=0.35,<1"]
+mongo = ["pymongo>=4.9,<5"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+senda-agent = "senda_autonomous_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
