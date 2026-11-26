@@ -9,5 +9,14 @@
   },
   "max_replans": 2,
   "python_execution": {},
-  "hook_exporters": [{"type": "jsonl", "path": ".local/hooks.jsonl"}]
+  "hook_exporters": [
+    {"type": "jsonl", "path": ".local/hooks.jsonl"},
+    {
+      "type": "argus",
+      "endpoint": "https://argus.example.com",
+      "api_key": "test-api-key",
+      "log_http": true,
+      "log_payload": true
+    }
+  ]
 }

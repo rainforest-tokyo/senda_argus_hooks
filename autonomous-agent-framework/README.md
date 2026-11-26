@@ -114,6 +114,31 @@ Senda-Argusへ送信するJSON本文を確認する場合は、`hook_exporters` 
 
 `AgentConfig` と `Goal` を作成し、`await AgentRunner(config).run(goal)` を呼びます。標準出力とMongoDBをフレームワークの設定から初期化する場合は、呼び出しを `with progress_logging(config):` で囲みます。アプリでSenda-Argusの初期化を管理している場合は、その設定で `AgentRunner` を利用できます。
 
+### wheelをインストールしてmain.pyを実行
+
+このディレクトリで、Frameworkと依存するSenda-Argus Hooksのwheelをインストールします。`main.py` はパッケージの公開APIを使って、サンプルカフェの営業分数を計算します。
+
+```bash
+python3 -m venv .local/wheel-env
+source .local/wheel-env/bin/activate
+python -m pip install dist/senda_argus_hooks-0.8.0-py3-none-any.whl \
+  dist/senda_autonomous_agent-0.1.0-py3-none-any.whl
+
+docker pull python:3.12-slim
+senda-agent import --db .local/knowledge.sqlite examples/documents
+python main.py
+```
+
+実行時はDockerと、`qwen3-coder:30b` を登録したローカルOllamaを起動してください。接続先や保存先は `examples/python-ollama.json`、目的・ゴール・完了条件は `main.py` で変更できます。ソース配布用のアーカイブにも `main.py` と `examples/` が含まれます。
+
+ソースから配布ファイルを作る場合は、ビルド用の環境で以下を実行します。
+
+```bash
+python -m pip install build
+python -m build --wheel --outdir "$PWD/dist" ../python
+python -m build
+```
+
 ## テスト
 
 ```bash
