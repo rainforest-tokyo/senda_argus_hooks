@@ -35,7 +35,8 @@ class ArgusExporter(BaseExporter):
             "endpoint": "http://localhost:8000",
             "api_key": "your-api-key",
             "run_id": "optional-fixed-run-id",
-            "timeout": 10
+            "timeout": 10,
+            "log_payload": false
         }
 
     endpoint + "/v1/agent-runs/ingest" に POST する。
@@ -53,6 +54,7 @@ class ArgusExporter(BaseExporter):
         self._run_id: str | None = config.get("run_id")
         self._timeout: int = int(config.get("timeout", 10))
         self._log_http: bool = bool(config.get("log_http", False))
+        self._log_payload = config.get("log_payload") is True
         self._queue: queue.Queue = queue.Queue(maxsize=_SEND_QUEUE_MAX)
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
@@ -111,6 +113,9 @@ class ArgusExporter(BaseExporter):
         count = self._event_count(payload) if self._log_http else None
         suffix = f" events={count}" if count is not None else ""
         self._http_log(f"POST {self._url}{suffix} bytes={len(payload)}")
+        if self._log_payload:
+            with contextlib.suppress(OSError, ValueError):
+                print(f"[senda-argus-http] payload={payload.decode('utf-8')}", file=sys.stderr, flush=True)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()

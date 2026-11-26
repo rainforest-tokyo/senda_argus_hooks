@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,6 +100,33 @@ def test_registry_creates_argus_exporter(capture_server):
     _, endpoint = capture_server
     exporter = create_exporter({"type": "argus", "endpoint": endpoint})
     assert isinstance(exporter, ArgusExporter)
+
+
+@pytest.mark.parametrize("options", [
+    {"log_http": True},
+    {"log_payload": True},
+    {"log_http": True, "log_payload": True},
+])
+def test_http_payload_logging_is_opt_in(options, monkeypatch, capsys):
+    requests = []
+
+    def urlopen(request, *, timeout):
+        requests.append(request)
+        return nullcontext(SimpleNamespace(status=200))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    exporter = ArgusExporter({"api_key": "test-header-secret", "run_id": "run-1", **options})
+    exporter.export([{"event_id": "e1", "data": {"text": "確認用イベント"}}])
+    exporter.shutdown()
+
+    assert len(requests) == 1
+    log = capsys.readouterr().err
+    body_prefix = "[senda-argus-http] payload="
+    bodies = [line.removeprefix(body_prefix) for line in log.splitlines() if line.startswith(body_prefix)]
+    expected = [requests[0].data.decode("utf-8")] if options.get("log_payload") else []
+    assert bodies == expected
+    assert "test-header-secret" not in log
+    assert ("status=200" in log) == options.get("log_http", False)
 
 
 def test_shutdown_drains_pending_in_order():

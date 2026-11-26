@@ -54,6 +54,8 @@ senda-agent run --config examples/ollama.json \
 
 MongoDBは運用中の進捗イベントをバックグラウンドで保存します。イベントIDを `_id` に使い、再試行で同じドキュメントの追加を防ぎます。MongoDBの保存失敗は標準エラー出力で確認できます。LLMやMCP呼び出しを含むHookイベントは、サンプルの `hook_exporters` 設定で `.local/hooks.jsonl` に保存します。進捗、ファクト、Hookイベントは共通の `run_id` で照合できます。
 
+Senda-Argusへ送信するJSON本文を確認する場合は、`hook_exporters` の `type: argus` の項目に `"log_payload": true` を指定します。HTTPリクエストの直前に、送信する本文を `[senda-argus-http] payload=` に続けて標準エラー出力へ一行で表示します。HTTPステータスも確認するには `"log_http": true` を併用します。標準出力とまとめて保存する場合は、実行コマンドの末尾に `> agent.log 2>&1` を付けます。
+
 ## Pythonから実行
 
 `AgentConfig` と `Goal` を作成し、`await AgentRunner(config).run(goal)` を呼びます。標準出力とMongoDBをフレームワークの設定から初期化する場合は、呼び出しを `with progress_logging(config):` で囲みます。アプリでSenda-Argusの初期化を管理している場合は、その設定で `AgentRunner` を利用できます。
