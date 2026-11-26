@@ -33,6 +33,24 @@ class Plan(Contract):
     steps: list[Step]
 
 
+class PythonTransformArgs(Contract):
+    task: NonEmpty
+    input_fact_ids: list[NonEmpty] | None = Field(
+        default=None, min_length=1, description="Use all facts available when this step runs if omitted or null.",
+    )
+    required_output_keys: list[NonEmpty] = Field(default_factory=list)
+
+
+class GeneratedPython(Contract):
+    code: str = Field(min_length=1, max_length=16_000, description="Complete Python source without Markdown fences.")
+
+
+class PlanningStrategy(Contract):
+    direction: NonEmpty
+    required_evidence: list[NonEmpty]
+    selected_tool_ids: list[NonEmpty]
+
+
 class WorkerReview(Contract):
     findings: list[NonEmpty]
     fact_ids: list[NonEmpty]
@@ -50,6 +68,7 @@ class NoArgs(Contract):
 
 class ReplanArgs(Contract):
     focus: NonEmpty | None = None
+    scope: Literal["execution", "strategy"] = "execution"
 
 
 class CriterionCheck(Contract):
@@ -58,12 +77,16 @@ class CriterionCheck(Contract):
     fact_ids: list[NonEmpty]
 
 
+class ReplanCall(APICall):
+    api: Literal["revise_plan", "rebuild_plan"]
+
+
 class GoalDecision(Contract):
     completed: bool
     reason: NonEmpty
     fact_ids: list[NonEmpty]
     missing_evidence: list[NonEmpty]
-    next_call: APICall | None
+    next_call: ReplanCall | None
 
     @model_validator(mode="after")
     def check_route(self) -> GoalDecision:
@@ -110,6 +133,7 @@ class RunState:
     facts: list[Fact] = field(default_factory=list)
     attempts: list[Attempt] = field(default_factory=list)
     replan: ReplanRequest | None = None
+    strategy: PlanningStrategy | None = None
 
     def validate_fact_ids(self, fact_ids: list[str]) -> None:
         unknown = set(fact_ids) - {fact.fact_id for fact in self.facts}

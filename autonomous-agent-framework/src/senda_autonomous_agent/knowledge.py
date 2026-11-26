@@ -16,6 +16,9 @@ from .config import RAGConfig
 from .contracts import Contract, Fact, NonEmpty, RunState
 
 
+EVIDENCE_DOCUMENT = "COALESCE(json_extract(documents.metadata, '$.doc_type'), '') != 'tool_help'"
+
+
 class Document(Contract):
     id: NonEmpty
     title: NonEmpty
@@ -53,7 +56,7 @@ class SQLiteRetriever:
             ):
                 rows = db.execute(
                     "SELECT DISTINCT item.value FROM documents, json_each(metadata, ?) AS item "
-                    "WHERE item.type = 'text' ORDER BY item.value LIMIT 41",
+                    f"WHERE item.type = 'text' AND {EVIDENCE_DOCUMENT} ORDER BY item.value LIMIT 41",
                     (path,),
                 )
                 values = [row[0] for row in rows]
@@ -71,7 +74,7 @@ class SQLiteRetriever:
         }
 
     def search(self, args: SearchArgs, catalog: dict) -> list[Document]:
-        conditions = []
+        conditions = [EVIDENCE_DOCUMENT]
         params = []
         for keyword in args.keywords:
             conditions.append("(instr(lower(title), lower(?)) > 0 OR instr(lower(body), lower(?)) > 0)")
@@ -89,16 +92,24 @@ class SQLiteRetriever:
                     params.append(tag)
             else:
                 raise ValueError("Invalid value for RAG metadata filter")
-        query = "SELECT id, title, body, source, metadata FROM documents"
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY id LIMIT ?"
+        query = (
+            "SELECT id, title, body, source, metadata FROM documents WHERE "
+            + " AND ".join(conditions) + " ORDER BY id LIMIT ?"
+        )
         with closing(self._connect()) as db:
             return [
                 Document(id=row["id"], title=row["title"], body=row["body"], source=row["source"],
                          metadata=json.loads(row["metadata"]))
                 for row in db.execute(query, (*params, self.config.limit))
             ]
+
+    def tool_help(self, tool_id: str) -> list[dict[str, str]]:
+        with closing(self._connect()) as db:
+            return [dict(row) for row in db.execute(
+                "SELECT title, body, source FROM documents WHERE json_extract(metadata, '$.doc_type') = 'tool_help' "
+                "AND json_extract(metadata, '$.tool_id') = ? ORDER BY id LIMIT ?",
+                (tool_id, self.config.limit),
+            )]
 
 
 def read_document(path: Path) -> Document:
@@ -119,6 +130,12 @@ def read_document(path: Path) -> Document:
         metadata["tags"] = list(dict.fromkeys(tag.strip() for tag in tags if isinstance(tag, str) and tag.strip()))
     if isinstance(info.get("severity"), str):
         metadata["severity"] = info["severity"]
+    extra = info.get("metadata")
+    if isinstance(extra, dict) and extra.get("doc_type") == "tool_help":
+        tool_id = extra.get("tool_id")
+        if not isinstance(tool_id, str) or not tool_id.strip():
+            raise ValueError(f"Tool Help requires info.metadata.tool_id: {path}")
+        metadata.update(doc_type="tool_help", tool_id=tool_id.strip())
     description = info.get("description") or ""
     return Document(id=raw.get("id"), title=info.get("name"), body=description, source=source, metadata=metadata)
 

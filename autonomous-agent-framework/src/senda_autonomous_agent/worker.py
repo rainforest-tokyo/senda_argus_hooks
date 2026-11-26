@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
 from time import perf_counter
+from uuid import uuid4
 
 from .connectors import MCPArgs, MCPCollectionError, MCPTools
-from .contracts import Attempt, CriterionArgs, CriterionCheck, NoArgs, Plan, RunState, Step, WorkerReview
+from .contracts import (
+    Attempt, CriterionArgs, CriterionCheck, GeneratedPython, NoArgs, Plan, PythonTransformArgs, RunState, Step,
+    WorkerReview,
+)
 from .knowledge import FactStore, SearchArgs, SQLiteRetriever
-from .model import JSONModel
+from .model import JSONModel, ModelOutputError
 from .planner import replan_api_catalog
 from .progress import report
+from .python_execution import DockerPythonRunner, PYTHON_TRANSFORM_API, PythonExecutionError
 
 
 class Worker:
-    def __init__(self, model: JSONModel, store: FactStore, retriever: SQLiteRetriever | None, mcp: MCPTools):
+    def __init__(self, model: JSONModel, store: FactStore, retriever: SQLiteRetriever | None, mcp: MCPTools,
+                 python_runner: DockerPythonRunner | None = None):
         self.model = model
         self.store = store
         self.retriever = retriever
         self.mcp = mcp
+        self.python_runner = python_runner
         self.rag_catalog = retriever.describe_search() if retriever else None
 
     def describe_apis(self) -> dict:
@@ -32,6 +41,15 @@ class Worker:
                 "description": "Collect evidence with a listed read-only source tool",
                 "arguments": MCPArgs.model_json_schema(),
                 "tools": tools,
+            }
+        if self.python_runner is not None:
+            catalog[PYTHON_TRANSFORM_API] = {
+                "description": "Transform or aggregate collected facts with Python in an offline container",
+                "arguments": PythonTransformArgs.model_json_schema(),
+                "instructions": "Plan the transformation after its input collection steps. Describe the transformation "
+                                "in task and the expected JSON in expected_data. Set required_output_keys to the "
+                                "expected top-level keys. Use null or omit input_fact_ids to include facts collected "
+                                "earlier in this plan. The worker generates the script at execution time.",
             }
         return catalog
 
@@ -63,17 +81,84 @@ class Worker:
                 fact_ids = []
                 if content not in (None, "", [], {}):
                     fact_ids.append(self.store.add(source=f"mcp:{args.server}/{args.tool}", content=content).fact_id)
+            elif step.api == PYTHON_TRANSFORM_API and self.python_runner is not None:
+                fact_ids = [await self._transform_with_python(state, step)]
             else:
                 raise ValueError("Unavailable collection API")
         except (ValueError, sqlite3.Error) as error:
-            failure = str(error) if isinstance(error, MCPCollectionError) else type(error).__name__
+            failure = str(error) if isinstance(error, (MCPCollectionError, PythonExecutionError)) else type(error).__name__
             report(state, "ワーカー", "agent.step.failed", f"{step.api} の収集に失敗",
                    status="error", api=step.api, failure=failure, started=started)
-            return Attempt(round=state.round, step=step, status="failed", fact_ids=[], failure=failure)
+            diagnostic = f"{failure}: {error.detail}" if isinstance(error, PythonExecutionError) and error.detail else failure
+            return Attempt(round=state.round, step=step, status="failed", fact_ids=[], failure=diagnostic)
         report(state, "ワーカー", "agent.step.completed",
                f"{step.api} でファクトを {len(fact_ids)} 件取得" if fact_ids else f"{step.api} の該当データは0件",
                api=step.api, fact_count=len(fact_ids), started=started)
         return Attempt(round=state.round, step=step, status="collected" if fact_ids else "empty", fact_ids=fact_ids)
+
+    async def _transform_with_python(self, state: RunState, step: Step) -> str:
+        assert self.python_runner is not None
+        try:
+            arguments = PythonTransformArgs.model_validate(step.arguments)
+            state.validate_fact_ids(arguments.input_fact_ids or [])
+        except ValueError as error:
+            raise PythonExecutionError("Invalid Python transform arguments", detail=str(error)[:1024]) from error
+        input_ids = set(arguments.input_fact_ids or ())
+        facts = [fact for fact in state.facts if not input_ids or fact.fact_id in input_ids]
+        if not facts:
+            raise PythonExecutionError("Python processing requires at least one collected fact")
+        input_json = self.python_runner.prepare_input(facts)
+
+        report(state, "ワーカー", "agent.python.generation.started", "ファクトを加工するPythonを生成中", status="start")
+        try:
+            script = await self.model.ask(
+                GeneratedPython,
+                {
+                    "purpose_and_goal": state.goal.model_dump(),
+                    "task": arguments.task,
+                    "expected_data": step.expected_data,
+                    "required_output_keys": arguments.required_output_keys,
+                    "input": json.loads(input_json),
+                    "execution_instructions": "Read input.json in the current directory. It has the same format as "
+                                              "input above. Use the Python 3.12 standard library. Compute the result "
+                                              "from the file contents and print exactly one JSON object to stdout. "
+                                              "Use stderr for diagnostics. The container has no network.",
+                },
+                role="worker", prompt_name="generate_python",
+            )
+        except ModelOutputError as error:
+            raise PythonExecutionError("LLM did not return Python source in the required JSON format") from error
+
+        artifact_id = f"python_{uuid4().hex}"
+        execution_started = perf_counter()
+        report(state, "ワーカー", "agent.python.execution.started", f"隔離環境でPythonを実行中 ({artifact_id})",
+               status="start", artifact_id=artifact_id)
+        try:
+            content = await self.python_runner.run(
+                state.run_id, artifact_id, script.code, input_json, arguments.required_output_keys,
+            )
+        except asyncio.CancelledError:
+            report(state, "ワーカー", "agent.python.execution.cancelled", f"Pythonの実行を中止 ({artifact_id})",
+                   status="cancelled", started=execution_started, artifact_id=artifact_id)
+            raise
+        except (OSError, PythonExecutionError) as error:
+            failure = error if isinstance(error, PythonExecutionError) else PythonExecutionError(
+                "Could not start Python or save its artifacts", detail=type(error).__name__,
+            )
+            report(state, "ワーカー", "agent.python.execution.failed", f"Pythonの実行に失敗 ({artifact_id})",
+                   status="error", started=execution_started, artifact_id=artifact_id,
+                   exit_code=failure.exit_code, failure=str(failure))
+            if failure is error:
+                raise
+            raise failure from error
+
+        fact = self.store.add(
+            source=f"python:{artifact_id}", source_id=artifact_id, content=content,
+            metadata={"derived": True, "input_fact_ids": [item.fact_id for item in facts], "artifact_id": artifact_id},
+        )
+        report(state, "ワーカー", "agent.python.execution.completed", f"Pythonの結果を保存 ({artifact_id})",
+               started=execution_started, artifact_id=artifact_id, fact_id=fact.fact_id, exit_code=0)
+        return fact.fact_id
 
     async def review_facts(self, state: RunState, *, remaining: list[Step] | None = None,
                            checks: dict[str, CriterionCheck] | None = None) -> WorkerReview:
@@ -97,13 +182,9 @@ class Worker:
         report(state, "ワーカー", "agent.review.started", "収集結果を精査中", status="start")
         review = await self.model.ask(
             WorkerReview,
-            "Review collected evidence. Identify missing data and discrepancies. "
-            "If a collection route failed or returned no data and a revised plan is needed, call revise_plan. "
-            "If useful independent steps remain, choose continue_work. "
-            "Call check_criterion only when a targeted check is useful; otherwise call evaluate_goal. "
-            "Never repeat a previously checked criterion.",
             {
                 "purpose_and_goal": state.goal.model_dump(),
+                "strategy": state.strategy.model_dump() if state.strategy else None,
                 "current_plan": state.plan.model_dump() if state.plan else None,
                 "facts": [fact.model_dump() for fact in state.facts],
                 "attempts": [attempt.model_dump() for attempt in state.attempts if attempt.round == state.round],
@@ -111,6 +192,7 @@ class Worker:
                 "criterion_checks": {name: result.model_dump() for name, result in checks.items()},
                 "available_apis": apis,
             },
+            role="worker",
         )
         state.validate_fact_ids(review.fact_ids)
         call = review.next_call

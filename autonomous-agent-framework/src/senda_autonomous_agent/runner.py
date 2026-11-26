@@ -15,18 +15,22 @@ from senda_argus_hooks.core.context import new_run_id, reset_run_id, reset_trace
 from .config import AgentConfig, LLMConfig, Role
 from .connectors import MCPTools
 from .contracts import (
-    CriterionArgs, CriterionCheck, Goal, GoalDecision, Plan, ReplanArgs, ReplanRequest, RunResult, RunState, WorkerReview,
+    CriterionArgs, CriterionCheck, Goal, GoalDecision, Plan, PlanningStrategy, ReplanArgs, ReplanRequest, RunResult,
+    RunState, WorkerReview,
 )
 from .goal_judge import GoalJudge
 from .knowledge import FactStore, SQLiteRetriever
 from .model import JSONModel
 from .planner import Planner
 from .progress import report
+from .python_execution import DockerPythonRunner
+from .tool_catalog import ToolCatalog
 from .worker import Worker
 
 
 class RoundState(TypedDict):
     run: RunState
+    strategy: NotRequired[PlanningStrategy]
     plan: NotRequired[Plan]
     review: NotRequired[WorkerReview]
     decision: NotRequired[GoalDecision]
@@ -46,7 +50,10 @@ class AgentRunner:
         on_response: ResponseObserver | None = None,
     ):
         self.config = config
-        self.planner = Planner(self._model("planner", client_factory, on_prompt, on_response))
+        self.planner = Planner(
+            self._model("planner", client_factory, on_prompt, on_response),
+            strategy_system_prompt=config.llm.default.system_prompt,
+        )
         self.worker_model = self._model("worker", client_factory, on_prompt, on_response)
         self.goal_judge = GoalJudge(self._model("goal_judge", client_factory, on_prompt, on_response))
 
@@ -82,7 +89,10 @@ class AgentRunner:
                         for name, failure in mcp.unavailable.items():
                             report(state, "ワーカー", "agent.sources.failed", f"MCPサーバー {name} を利用できません",
                                    status="error", server=name, failure=failure)
-                    worker = Worker(self.worker_model, store, SQLiteRetriever(sources.rag) if sources.rag else None, mcp)
+                    python_runner = DockerPythonRunner(self.config.python_execution) if self.config.python_execution else None
+                    worker = Worker(
+                        self.worker_model, store, SQLiteRetriever(sources.rag) if sources.rag else None, mcp, python_runner,
+                    )
                     result = await self._run_rounds(state, worker, store)
             report(state, "実行", "agent.run.completed" if result.status == "completed" else "agent.run.incomplete",
                    "ゴールを達成" if result.status == "completed" else "再計画の上限に到達",
@@ -134,19 +144,46 @@ class AgentRunner:
             state.round += 1
 
     def _round_graph(self, worker: Worker):
+        catalog = ToolCatalog(worker.describe_apis(), worker.mcp, worker.retriever)
+
+        async def strategy(round_state: RoundState) -> dict:
+            state = round_state["run"]
+            if (
+                state.strategy and state.strategy.selected_tool_ids and state.replan
+                and state.replan.call.api == "revise_plan"
+                and state.replan.call.arguments.get("scope", "execution") == "execution"
+            ):
+                report(state, "方針プランナー", "agent.strategy.reused", "前の周回の方針を再利用",
+                       tool_ids=state.strategy.selected_tool_ids)
+                return {"strategy": state.strategy}
+            report(state, "方針プランナー", "agent.strategy.started", "必要な根拠と候補ツールを検討中", status="start")
+            started = perf_counter()
+            state.strategy = await self.planner.select_tools(state, catalog.list_tools())
+            tool_ids = state.strategy.selected_tool_ids
+            report(state, "方針プランナー", "agent.strategy.completed", f"候補ツールを {len(tool_ids)} 件選定",
+                   tool_ids=tool_ids, started=started)
+            return {"strategy": state.strategy}
+
         async def plan(round_state: RoundState) -> dict:
             state = round_state["run"]
+            selection = round_state["strategy"]
+            selected_tools = []
+            for tool_id in selection.selected_tool_ids:
+                report(state, "実行プランナー", "agent.tool_help.started", f"{tool_id} のHelpを取得中",
+                       tool_id=tool_id, status="start")
+                help_started = perf_counter()
+                help_details = await catalog.get_tool_help(tool_id)
+                selected_tools.append(help_details)
+                report(state, "実行プランナー", "agent.tool_help.completed", f"{tool_id} のツール情報を取得",
+                       tool_id=tool_id, help_count=len(help_details["help_documents"]),
+                       help_warnings=help_details.get("help_warnings", []), started=help_started)
+
             method = state.replan.call.api if state.replan else "create_plan"
-            report(state, "プランナー", "agent.plan.started", f"{method} で作業手順を作成中", status="start",
+            report(state, "実行プランナー", "agent.plan.started", f"{method} で作業手順を作成中", status="start",
                    api=method)
             started = perf_counter()
-            planning_methods = {
-                "create_plan": self.planner.create_plan,
-                "revise_plan": self.planner.revise_plan,
-                "rebuild_plan": self.planner.rebuild_plan,
-            }
-            state.plan = await planning_methods[method](state, worker.describe_apis())
-            report(state, "プランナー", "agent.plan.completed", f"作業手順を {len(state.plan.steps)} 件作成",
+            state.plan = await self.planner.build_plan(state, selection, selected_tools)
+            report(state, "実行プランナー", "agent.plan.completed", f"作業手順を {len(state.plan.steps)} 件作成",
                    api=method, step_count=len(state.plan.steps), started=started)
             return {"plan": state.plan}
 
@@ -174,10 +211,12 @@ class AgentRunner:
             return {"review": review, "decision": decision}
 
         graph = StateGraph(RoundState)
+        graph.add_node("strategy", strategy)
         graph.add_node("plan", plan)
         graph.add_node("work", work)
         graph.add_node("judge", judge)
-        graph.add_edge(START, "plan")
+        graph.add_edge(START, "strategy")
+        graph.add_edge("strategy", "plan")
         graph.add_edge("plan", "work")
         graph.add_conditional_edges(
             "work", lambda state: state["review"].next_call.api == "revise_plan",

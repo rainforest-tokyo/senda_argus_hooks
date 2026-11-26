@@ -12,13 +12,13 @@ from pydantic import ValidationError
 from senda_argus_hooks.core.context import get_run_id, get_turn_id
 
 from .config import AgentConfig, Role
-from .contracts import Goal
+from .contracts import Goal, PlanningStrategy
 from .knowledge import import_documents, read_document
 from .progress import progress_logging
 from .runner import AgentRunner
 
 
-_ROLE_LABELS = {"planner": "プランナー", "worker": "ワーカー", "goal_judge": "ゴール判定"}
+_ROLE_LABELS = {"planner": "実行プランナー", "worker": "ワーカー", "goal_judge": "ゴール判定"}
 _MESSAGE_LABELS = {"system": "システムプロンプト", "human": "ユーザー入力"}
 
 
@@ -44,9 +44,10 @@ def _format_content(content: str | list[str | dict]) -> str:
 
 
 def _exchange_header(direction: str, role: Role, schema: str) -> str:
+    role_label = "方針プランナー" if schema == PlanningStrategy.__name__ else _ROLE_LABELS[role]
     return (
         f"\n{'─' * 60}\n"
-        f"LLM {direction}  {_ROLE_LABELS[role]} ({schema})\n"
+        f"LLM {direction}  {role_label} ({schema})\n"
         f"run_id   {get_run_id()}\n"
         f"turn_id  {get_turn_id()}"
     )

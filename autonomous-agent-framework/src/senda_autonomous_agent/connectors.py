@@ -4,7 +4,7 @@ from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any
 
-from pydantic import JsonValue
+from pydantic import AnyUrl, JsonValue
 
 from .config import MCPConfig, secret_from_env
 from .contracts import Contract, NonEmpty
@@ -23,6 +23,7 @@ class MCPCollectionError(ValueError):
 class MCPTools:
     def __init__(self):
         self._tools: dict[tuple[str, str], tuple[Any, Any]] = {}
+        self._help_resources: dict[tuple[str, str], AnyUrl] = {}
         self.unavailable: dict[str, str] = {}
 
     async def open(self, servers: list[MCPConfig], stack: AsyncExitStack) -> None:
@@ -76,6 +77,10 @@ class MCPTools:
                     else:
                         stack.push_async_callback(server_stack.pop_all().aclose)
                         self._tools.update(discovered)
+                        self._help_resources.update({
+                            (config.name, name): uri for name, uri in config.help_resources.items()
+                            if (config.name, name) in discovered
+                        })
             except Exception as error:
                 self.unavailable[config.name] = type(error).__name__
 
@@ -83,6 +88,22 @@ class MCPTools:
         return [
             {"server": server, "tool": name, "description": tool.description, "input_schema": tool.inputSchema}
             for (server, name), (_, tool) in self._tools.items()
+        ]
+
+    async def read_help(self, server: str, tool: str) -> list[dict[str, str]]:
+        key = (server, tool)
+        uri = self._help_resources.get(key)
+        if uri is None:
+            return []
+        session, _ = self._tools[key]
+        try:
+            result = await session.read_resource(uri)
+        except Exception as error:
+            raise MCPCollectionError("MCP Help resource could not be read") from error
+        return [
+            {"source": str(item.uri), "body": item.text}
+            for item in result.contents
+            if isinstance(getattr(item, "text", None), str)
         ]
 
     async def collect(self, arguments: MCPArgs) -> JsonValue:

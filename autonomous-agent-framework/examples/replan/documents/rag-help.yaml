@@ -1,0 +1,10 @@
+id: replan-rag-help
+info:
+  name: 窓口案内の検索方法
+  description: |
+    keywords には本文またはタイトルに含まれる語を指定します。
+    例として営業時間資料の検索には keywords に「営業時間」を指定します。
+    資料から照会コードを取得した場合は、そのコードで関連資料を検索できます。
+  metadata:
+    doc_type: tool_help
+    tool_id: rag:retrieve_from_rag
