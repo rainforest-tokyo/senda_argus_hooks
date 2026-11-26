@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, JsonValue, model_validator
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import Draft202012Validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class Config(BaseModel):
@@ -143,6 +145,36 @@ class SystemPrompts(Config):
         return prompts
 
 
+PromptTemplate = Annotated[str, Field(min_length=1)]
+
+
+class UserPrompt(Config):
+    template: PromptTemplate
+    output_schema: dict[str, JsonValue] | None = None
+
+    @field_validator("output_schema")
+    @classmethod
+    def check_output_schema(cls, value: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+        if value is not None:
+            try:
+                Draft202012Validator.check_schema(value)
+            except SchemaError as error:
+                raise ValueError(f"Invalid user prompt output schema: {error.message}") from error
+        return value
+
+
+class UserPrompts(Config):
+    default: PromptTemplate | None = None
+    strategy_planner: PromptTemplate | UserPrompt | None = None
+    execution_planner: PromptTemplate | UserPrompt | None = None
+    worker: PromptTemplate | UserPrompt | None = None
+    goal_judge: PromptTemplate | UserPrompt | None = None
+
+    def for_role(self, role: PromptRole) -> UserPrompt | None:
+        prompt = getattr(self, role) or self.default
+        return UserPrompt(template=prompt) if isinstance(prompt, str) else prompt
+
+
 class LLMConfig(Config):
     provider: Literal["openai", "openai_compatible"] = "openai_compatible"
     model: str = Field(min_length=1)
@@ -152,6 +184,7 @@ class LLMConfig(Config):
     system_prompt: str = ""
     role_prompts: RolePrompts = Field(default_factory=RolePrompts)
     system_prompts: SystemPrompts = Field(default_factory=SystemPrompts)
+    user_prompts: UserPrompts = Field(default_factory=UserPrompts)
     mcp: list[MCPConfig] = Field(default_factory=list)
     rag: RAGConfig | None = None
 

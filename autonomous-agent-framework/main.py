@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from senda_autonomous_agent import (
-    AgentConfig, AgentLLMConfig, AgentRunner, Goal, LLMConfig, SystemPrompts, progress_logging,
+    AgentConfig, AgentLLMConfig, AgentRunner, Goal, LLMConfig, SystemPrompts, UserPrompt, UserPrompts, progress_logging,
 )
 from senda_autonomous_agent.config import MCPConfig, RAGConfig
 
@@ -39,6 +39,15 @@ def mcp_rag_example() -> tuple[AgentConfig, Goal]:
                 f"{defaults.goal_judge} Completion requires an opening-hours fact from SQLite RAG and a contact "
                 "email fact from MCP. Include both evidence IDs in fact_ids."
             ),
+        ),
+        user_prompts=UserPrompts(
+            strategy_planner="今回確認する案内項目と、それぞれの情報源を整理してください。",
+            execution_planner="参考の収集方針に沿って、営業時間と問い合わせ先の取得手順を作成してください。\n{{LLM-Plan}}",
+            worker=UserPrompt(
+                template="取得した営業時間とメールアドレスの根拠を確認してください。参考の実行計画\n{{LLM-Plan}}",
+                output_schema={"type": "object", "properties": {"fact_ids": {"type": "array", "uniqueItems": True}}},
+            ),
+            goal_judge="営業時間と問い合わせ用メールアドレスの両方について、根拠を確認してください。",
         ),
         rag=RAGConfig(path=Path(".local/knowledge.sqlite")),
         mcp=[MCPConfig(

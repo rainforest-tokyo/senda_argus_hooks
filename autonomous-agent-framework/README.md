@@ -52,6 +52,12 @@ llm_config = LLMConfig(
 
 個別の完了条件を確認する指示は `check_criterion` で指定できます。この項目にも `default` が適用されます。実行プランナーのユーザー入力に含まれる `operation` は、初回計画・修正・組み直しの種別を表します。
 
+`LLMConfig(user_prompts=UserPrompts(...))` で、`strategy_planner`、`execution_planner`、`worker`、`goal_judge` のUserメッセージに追加する依頼文を設定できます。JSON設定では `llm.default.user_prompts` を使います。個別指定を優先し、省略時は共通の `default` を使います。設定した依頼文は既存の入力JSONの `task` に追加されます。Pythonコード生成と個別の完了条件確認は、それぞれ専用の入力を使います。
+
+テンプレートの `{{LLM-Plan}}` は、実行プランナーでは検証済みの方針 `PlanningStrategy`、ワーカーとゴール判定では実行計画 `Plan`、方針プランナーでは直前の実行計画のJSONに置換されます。対象の計画がまだないときは `null` が入ります。
+
+各機能には文字列、または `UserPrompt(template=..., output_schema=...)` を指定できます。`output_schema` は機能の既定の出力形式に追加するJSON Schemaです。たとえば `{"properties": {"fact_ids": {"uniqueItems": true}}}` で根拠IDの重複を禁止できます。応答は既定の形式と追加条件の両方で検証されます。
+
 `senda-agent run` の `--show-prompts` はLLMへのシステムプロンプト・出力JSONスキーマ・入力本文を、`--show-responses` はLLMから受け取った本文をJSON検証前に標準エラー出力へ表示します。送信と受信は見出しで区切り、JSONはインデント付きで表示します。両方を指定すると、役割、`run_id`、`turn_id` で送受信を照合できます。表示にはRAGやMCPから取得した本文が含まれる場合があります。
 
 ## 情報源とファクト
@@ -122,7 +128,7 @@ Senda-Argusへ送信するJSON本文を確認する場合は、`hook_exporters` 
 python3 -m venv .local/wheel-env
 source .local/wheel-env/bin/activate
 python -m pip install dist/senda_argus_hooks-0.8.0-py3-none-any.whl \
-  dist/senda_autonomous_agent-0.1.0-py3-none-any.whl
+  dist/senda_autonomous_agent-0.1.1-py3-none-any.whl
 
 docker pull python:3.12-slim
 senda-agent import --db .local/knowledge.sqlite examples/documents
@@ -133,10 +139,10 @@ python main.py
 
 ### main.pyでシステムプロンプト・MCP・RAGを設定
 
-`main.py` の `mcp_rag_example()` は、`LLMConfig` に目的別の `system_prompt`、機能別の `SystemPrompts`、SQLiteの `RAGConfig`、読み取り専用の `MCPConfig` を渡す例です。この例では営業時間をSQLiteの資料から、問い合わせ用メールアドレスをローカルMCPから取得します。`main.py` が標準入出力を使うMCPサーバーを起動します。Ollamaを起動し、上記のwheel用仮想環境で実行してください。
+`main.py` の `mcp_rag_example()` は、`LLMConfig` に目的別の `system_prompt`、機能別の `SystemPrompts` と `UserPrompts`、SQLiteの `RAGConfig`、読み取り専用の `MCPConfig` を渡す例です。この例では営業時間をSQLiteの資料から、問い合わせ用メールアドレスをローカルMCPから取得します。`main.py` が標準入出力を使うMCPサーバーを起動します。Ollamaを起動し、上記のwheel用仮想環境で実行してください。
 
 ```bash
-python -m pip install 'dist/senda_autonomous_agent-0.1.0-py3-none-any.whl[mcp]'
+python -m pip install 'dist/senda_autonomous_agent-0.1.1-py3-none-any.whl[mcp]'
 senda-agent import --db .local/knowledge.sqlite examples/documents
 python main.py --example mcp-rag
 ```

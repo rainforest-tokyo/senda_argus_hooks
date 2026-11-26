@@ -29,6 +29,7 @@ class GoalJudge:
                 "planner_apis": replan_api_catalog(),
             },
             role="goal_judge",
+            llm_plan=state.plan,
         )
         state.validate_fact_ids(result.fact_ids)
         if result.next_call:

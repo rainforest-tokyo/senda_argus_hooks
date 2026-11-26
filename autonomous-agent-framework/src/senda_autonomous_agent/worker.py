@@ -193,6 +193,7 @@ class Worker:
                 "available_apis": apis,
             },
             role="worker",
+            llm_plan=state.plan,
         )
         state.validate_fact_ids(review.fact_ids)
         call = review.next_call

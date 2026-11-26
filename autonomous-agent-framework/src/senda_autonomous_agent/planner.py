@@ -23,6 +23,7 @@ class Planner:
             {**self._context(state), "available_tools": available_tools},
             role="strategy_planner",
             system_prompt=self.strategy_system_prompt,
+            llm_plan=state.plan,
         )
         registered = {tool["tool_id"] for tool in available_tools}
         if set(strategy.selected_tool_ids) - registered:
@@ -39,6 +40,7 @@ class Planner:
             {**self._context(state), "operation": operation, "strategy": strategy.model_dump(),
              "selected_tools": selected_tools},
             role="execution_planner",
+            llm_plan=strategy,
         )
         selected_ids = set(strategy.selected_tool_ids)
         for step in result.steps:

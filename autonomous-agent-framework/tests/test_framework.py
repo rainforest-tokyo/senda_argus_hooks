@@ -6,7 +6,8 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from senda_autonomous_agent import (
-    AgentConfig, AgentLLMConfig, AgentRunner, Goal, LLMConfig, PythonExecutionConfig, SystemPrompts, progress_logging,
+    AgentConfig, AgentLLMConfig, AgentRunner, Goal, LLMConfig, PythonExecutionConfig, SystemPrompts, UserPrompts,
+    progress_logging,
 )
 from senda_autonomous_agent.contracts import PlanningStrategy, RunState
 from senda_autonomous_agent.knowledge import Document, SearchArgs, SQLiteRetriever, import_documents, read_document
@@ -16,7 +17,7 @@ from senda_autonomous_agent.python_execution import DockerPythonRunner, PYTHON_T
 from senda_autonomous_agent.tool_catalog import PYTHON_TOOL_ID, RAG_TOOL_ID
 
 
-def settings(tmp_path, *, max_replans=-1, system_prompts=None):
+def settings(tmp_path, *, max_replans=-1, system_prompts=None, user_prompts=None):
     database = tmp_path / "docs.sqlite"
     import_documents(database, [
         Document(id="hours", title="営業時間", body="平日9時から17時", source="doc#1", metadata={"tags": ["案内"]}),
@@ -29,6 +30,7 @@ def settings(tmp_path, *, max_replans=-1, system_prompts=None):
         base_url="http://127.0.0.1:11434/v1",
         system_prompt="根拠を明示する。",
         system_prompts=system_prompts if system_prompts is not None else SystemPrompts(),
+        user_prompts=user_prompts if user_prompts is not None else UserPrompts(),
         rag={"path": database},
     )
     return AgentConfig(llm=AgentLLMConfig(default=llm), facts_dir=tmp_path / "facts", max_replans=max_replans)
@@ -86,6 +88,51 @@ def test_shared_system_prompt_survives_role_override():
     assert prompts.goal_judge == prompts.check_criterion == shared
     assert prompts.generate_python == shared
     assert prompts.worker == worker
+
+
+def test_user_prompts_render_per_phase_and_validate_additional_schema(tmp_path):
+    additional_schema = {"properties": {"fact_ids": {"type": "array", "uniqueItems": True}}}
+    prompts = UserPrompts(
+        default="共通の依頼\n{{LLM-Plan}}",
+        execution_planner="参考方針\n{{LLM-Plan}}",
+        worker={"template": "参考の実行計画\n{{LLM-Plan}}", "output_schema": additional_schema},
+        goal_judge="判定時の参考計画\n{{LLM-Plan}}",
+    )
+    config = settings(tmp_path, user_prompts=prompts)
+    criterion = "営業時間を確認できる。"
+    strategy_response = {**strategy(), "direction": "参考文字列 {{LLM-Plan}} を含む方針"}
+    plan_response = plan("営業時間")
+
+    def duplicate_ids(payload):
+        response = review(payload, "check_criterion", criterion=criterion)
+        return {**response, "fact_ids": response["fact_ids"] * 2}
+
+    planner = ScriptedDecisions([strategy_response, plan_response])
+    worker = ScriptedDecisions([
+        duplicate_ids,
+        lambda data: review(data, "check_criterion", criterion=criterion),
+        lambda data: review(data, "evaluate_goal"),
+    ])
+    judge = ScriptedDecisions([
+        lambda data: {"status": "met", "reason": "根拠あり", "fact_ids": [data["facts"][0]["fact_id"]]},
+        lambda data: {"completed": True, "reason": "完了", "missing_evidence": [], "next_call": None,
+                      "fact_ids": [data["facts"][0]["fact_id"]]},
+    ])
+    clients = {"planner": planner, "worker": worker, "goal_judge": judge}
+    result = asyncio.run(AgentRunner(config, client_factory=lambda role, _: clients[role]).run(
+        Goal(purpose="案内の確認", goal="営業時間を確認する", criteria=[criterion]),
+    ))
+
+    assert result.status == "completed" and result.rounds == 1
+    assert planner.inputs[0]["task"] == "共通の依頼\nnull"
+    assert json.loads(planner.inputs[1]["task"].split("\n", 1)[1]) == strategy_response
+    assert planner.inputs[1]["strategy"] == strategy_response
+    assert len(worker.inputs) == 3
+    assert worker.inputs[0] == worker.inputs[1]
+    assert worker.inputs[0]["output_schema"] == additional_schema
+    assert json.loads(worker.inputs[0]["task"].split("\n", 1)[1]) == plan_response
+    assert "task" not in judge.inputs[0]
+    assert json.loads(judge.inputs[1]["task"].split("\n", 1)[1]) == plan_response
 
 
 @pytest.mark.parametrize("prompts", [
