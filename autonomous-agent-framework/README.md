@@ -131,6 +131,20 @@ python main.py
 
 実行時はDockerと、`qwen3-coder:30b` を登録したローカルOllamaを起動してください。接続先や保存先は `examples/python-ollama.json`、目的・ゴール・完了条件は `main.py` で変更できます。ソース配布用のアーカイブにも `main.py` と `examples/` が含まれます。
 
+### main.pyでシステムプロンプト・MCP・RAGを設定
+
+`main.py` の `mcp_rag_example()` は、`LLMConfig` に目的別の `system_prompt`、機能別の `SystemPrompts`、SQLiteの `RAGConfig`、読み取り専用の `MCPConfig` を渡す例です。この例では営業時間をSQLiteの資料から、問い合わせ用メールアドレスをローカルMCPから取得します。`main.py` が標準入出力を使うMCPサーバーを起動します。Ollamaを起動し、上記のwheel用仮想環境で実行してください。
+
+```bash
+python -m pip install 'dist/senda_autonomous_agent-0.1.0-py3-none-any.whl[mcp]'
+senda-agent import --db .local/knowledge.sqlite examples/documents
+python main.py --example mcp-rag
+```
+
+期待値は、RAGの平日 `09:00〜17:00` とMCPの `cafe@example.com` です。進捗とHookイベントで、RAG取得、MCPのHelp取得とツール呼び出し、ゴール判定を確認できます。Hookイベントは `.local/mcp-rag-hooks.jsonl` に保存します。
+
+### ソースから配布ファイルを作成
+
 ソースから配布ファイルを作る場合は、ビルド用の環境で以下を実行します。
 
 ```bash
